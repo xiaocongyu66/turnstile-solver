@@ -125,6 +125,106 @@ else
 fi
 
 echo "  auto: workers=${SOLVER_GATEWAY_WORKERS} max=${SOLVER_GATEWAY_WORKERS_MAX} soft=${SOLVER_WATCHDOG_SOFT_MB} hard=${SOLVER_WATCHDOG_HARD_MB}"
+
+# Dump env at boot (redact API keys / passwords / tokens)
+echo "========== env (secrets redacted) =========="
+python - <<'PY'
+import os
+import re
+
+# Key name patterns to fully redact (API keys / tokens / passwords)
+SECRET_KEY = re.compile(
+    r"(API[_-]?KEY|API[_-]?TOKEN|SECRET|PASSWORD|PASSWD|PASS\b|TOKEN|AUTH|"
+    r"CREDENTIAL|PRIVATE[_-]?KEY|ACCESS[_-]?KEY|BEARER|JWT|HF_TOKEN|"
+    r"GITHUB_TOKEN|PAT\b|WEBHOOK)",
+    re.I,
+)
+# Always hide these exact names even if pattern misses
+SECRET_NAMES = {
+    "SOLVER_API_TOKEN",
+    "TURNSTILE_SOLVER_TOKEN",
+    "TURNSTILE_API_TOKEN",
+    "CAPSOLVER_API_KEY",
+    "CAPSOLVER_KEY",
+    "TWOCAPTCHA_API_KEY",
+    "CAPTCHA_API_KEY",
+    "MOEMAIL_API_KEY",
+    "SPACE_HF_TOKEN",
+    "HF_TOKEN",
+    "HUGGING_FACE_HUB_TOKEN",
+}
+
+# User:pass@host → ***:***@host  (proxy credentials)
+CREDS_IN_URL = re.compile(r"(://)([^:/@\s]+):([^@/\s]+)(@)")
+
+# Long hex/base64-looking secrets in values
+LONG_SECRET = re.compile(r"\b([A-Za-z0-9_\-]{32,})\b")
+
+
+def redact_value(key: str, val: str) -> str:
+    if key in SECRET_NAMES or SECRET_KEY.search(key):
+        if not val:
+            return "(empty)"
+        return f"(set, len={len(val)})"
+    # redact embedded credentials in proxy lists / URLs
+    out = CREDS_IN_URL.sub(r"\1***:***\4", val)
+    # if key looks like proxy pool, also mask bare user:pass@
+    if re.search(r"PROXY|PROXIES", key, re.I):
+        out = re.sub(r"\b([^:/\s]+):([^@/\s]+)@", r"***:***@", out)
+    return out
+
+
+# Prefer solver-related keys first, then the rest (stable sort)
+def sort_key(k: str):
+    pref = (
+        "SOLVER",
+        "TURNSTILE",
+        "CF_ARES",
+        "PROXY",
+        "PORT",
+        "HOST",
+        "PLAYWRIGHT",
+        "SPACE",
+        "PYTHON",
+    )
+    for i, p in enumerate(pref):
+        if k.upper().startswith(p) or p in k.upper():
+            return (0, i, k)
+    return (1, 99, k)
+
+
+items = sorted(os.environ.items(), key=lambda kv: sort_key(kv[0]))
+# skip noisy shell/path junk unless relevant
+SKIP_PREFIX = (
+    "LS_",
+    "OLDPWD",
+    "PWD",
+    "SHLVL",
+    "TERM",
+    "HOME",
+    "USER",
+    "SHELL",
+    "LANG",
+    "LC_",
+    "GPG_",
+    "SSH_",
+    "XDG_",
+    "LESS",
+    "MAIL",
+    "LOGNAME",
+)
+for k, v in items:
+    if any(k.startswith(p) or k == p.rstrip("_") for p in SKIP_PREFIX):
+        # keep PATH / PYTHONPATH
+        if k not in ("PATH", "PYTHONPATH", "PYTHONHOME"):
+            if k != "PATH" and k != "PYTHONPATH":
+                continue
+    if k in ("_",):
+        continue
+    print(f"  {k}={redact_value(k, v)}")
+print("==========================================")
+PY
+
 echo "🚀 Starting solver-gateway..."
 # Cap workers on HF when free RAM is moderate (avoid thrash + EPIPE)
 # Gateway still re-plans from live /proc/meminfo.
