@@ -7,10 +7,11 @@ Env (HF Secrets / docker):
         http://u:p@host:port
         socks5://u:p@host:port
         host:port
-        vmess://... vless://... trojan://... ss://... hy2://...
+        vmess://... vless://... trojan://... ss://... hy2://... hysteria2://...
+        base64 subscription blob (decoded to multi-line share links)
   PROXY_POOL_FILE          optional file (one proxy per line)
   PROXY_POOL_STRATEGY      round_robin | random   (default round_robin)
-  PROXY_RELAY_ENABLED      1 (default) convert share-links / socks5-auth
+  PROXY_RELAY_ENABLED      1 (default) convert share-links / socks5-auth via sing-box
   PROXY_RELAY_AUTO_INSTALL 1 auto-download sing-box if missing
   PROXY_RELAY_WORK_DIR     /tmp/solver-proxy-relay
   SOLVER_PROXY             single override (also CF_ARES_PROXY / HTTPS_PROXY)
@@ -103,14 +104,72 @@ def _env_proxy_text() -> str:
     ).strip()
 
 
+def _maybe_decode_subscription(text: str) -> str:
+    """If PROXY_POOL looks like base64 subscription, decode to multi-line links.
+
+    HF Secrets often paste the whole base64 blob as one line. Expand to
+    hysteria2:// / vmess:// / ... lines so relay can convert each node.
+    """
+    s = (text or "").strip()
+    if not s:
+        return s
+    # already share-link / URL list
+    low = s.lower()
+    if any(
+        x in low
+        for x in (
+            "hysteria2://",
+            "hy2://",
+            "vmess://",
+            "vless://",
+            "trojan://",
+            "ss://",
+            "socks5://",
+            "http://",
+            "https://",
+        )
+    ):
+        return s
+    # base64-ish single blob (no spaces, long)
+    compact = re.sub(r"\s+", "", s)
+    if len(compact) < 40:
+        return s
+    if not re.fullmatch(r"[A-Za-z0-9+/_-]+=*", compact):
+        return s
+    try:
+        import base64
+
+        # urlsafe or standard
+        pad = "=" * (-len(compact) % 4)
+        try:
+            data = base64.urlsafe_b64decode(compact + pad)
+        except Exception:
+            data = base64.b64decode(compact + pad)
+        decoded = data.decode("utf-8", errors="replace").strip()
+        if "://" in decoded or decoded.count("\n") >= 1:
+            log(f"decoded base64 subscription → {len(decoded.splitlines())} line(s)")
+            return decoded
+    except Exception as exc:
+        log(f"base64 subscription decode skip: {exc}")
+    return s
+
+
 def _split_proxy_text(raw: str) -> list[str]:
     if not raw:
         return []
+    raw = _maybe_decode_subscription(raw)
     chunks: list[str] = []
     for part in re.split(r"[\n,;|]+", raw):
         line = (part or "").strip()
-        if line and not line.startswith("#"):
-            chunks.append(line)
+        if not line or line.startswith("#"):
+            continue
+        # each piece may itself be a base64 blob
+        if "://" not in line and len(line) > 40 and re.fullmatch(r"[A-Za-z0-9+/_-]+=*", line):
+            for sub in _split_proxy_text(_maybe_decode_subscription(line)):
+                if sub not in chunks:
+                    chunks.append(sub)
+            continue
+        chunks.append(line)
     return chunks
 
 
