@@ -65,7 +65,11 @@ fi
 # Built-in proxy pool + CF-Ares (env-driven)
 export PYTHONPATH="${PYTHONPATH:-/app/worker:/app/vendor/CF-Ares}"
 export CF_ARES_PATH="${CF_ARES_PATH:-/app/vendor/CF-Ares}"
-export CF_ARES="${CF_ARES:-auto}"
+export CF_ARES="${CF_ARES:-1}"
+export CF_ARES_BROWSER_ENGINE="${CF_ARES_BROWSER_ENGINE:-undetected}"
+export CF_ARES_HEADLESS="${CF_ARES_HEADLESS:-1}"
+export CF_ARES_TIMEOUT="${CF_ARES_TIMEOUT:-60}"
+export CF_ARES_SESSION_DIR="${CF_ARES_SESSION_DIR:-/tmp/solver-cf-ares-sessions}"
 export PROXY_RELAY_ENABLED="${PROXY_RELAY_ENABLED:-1}"
 export PROXY_RELAY_AUTO_INSTALL="${PROXY_RELAY_AUTO_INSTALL:-1}"
 export PROXY_RELAY_WORK_DIR="${PROXY_RELAY_WORK_DIR:-/tmp/solver-proxy-relay}"
@@ -77,19 +81,26 @@ export PROXY_TEST_WORKERS="${PROXY_TEST_WORKERS:-8}"
 export PROXY_TEST_ACCEPT_STATUS="${PROXY_TEST_ACCEPT_STATUS:-200-399}"
 export PROXY_TEST_STATE_FILE="${PROXY_TEST_STATE_FILE:-/tmp/solver-proxy-test.json}"
 export PROXY_TEST_CACHE_SEC="${PROXY_TEST_CACHE_SEC:-300}"
-mkdir -p "${PROXY_RELAY_WORK_DIR}" 2>/dev/null || true
+mkdir -p "${PROXY_RELAY_WORK_DIR}" "${CF_ARES_SESSION_DIR}" 2>/dev/null || true
 
 _proxy_hint="(empty — set PROXY_POOL for residential/ISP)"
 if [ -n "${PROXY_POOL:-}${PROXY_POOL_LIST:-}${PROXIES:-}${PROXY_LIST:-}${SOLVER_PROXY:-}${CF_ARES_PROXY:-}" ]; then
   _proxy_hint="configured (PROXY_POOL / SOLVER_PROXY)"
 fi
 echo "🌐 proxy: ${_proxy_hint}  strategy=${PROXY_POOL_STRATEGY}  relay=${PROXY_RELAY_ENABLED}  test=${PROXY_TEST_ENABLED}"
-echo "🛡️  CF_ARES=${CF_ARES}  path=${CF_ARES_PATH}"
-if [ -d /app/vendor/CF-Ares/cf_ares ]; then
-  echo "   CF-Ares vendor: OK /app/vendor/CF-Ares"
-else
-  echo "   ⚠️  CF-Ares vendor MISSING at /app/vendor/CF-Ares (rebuild image from latest main)"
-fi
+echo "🛡️  CF_ARES=${CF_ARES} engine=${CF_ARES_BROWSER_ENGINE} path=${CF_ARES_PATH}"
+# Diagnose CF-Ares (vendor + pip fallback)
+python - <<'PY' 2>/dev/null || echo "   ⚠️  CF-Ares diagnose failed"
+import sys
+sys.path[:0] = ["/app/worker", "/app/vendor/CF-Ares"]
+try:
+    import cf_ares_helper as h
+    d = h.diagnose()
+    print(f"   CF-Ares available={d.get('available')} vendor={d.get('vendor_path')} "
+          f"app_vendor={d.get('exists_app_vendor')} pip_or_path_err={d.get('error') or 'none'}")
+except Exception as e:
+    print(f"   ⚠️  CF-Ares import error: {e}")
+PY
 
 # Auto-test proxies can reach accounts.x.ai / x.ai (shared state for workers)
 if [ "${PROXY_TEST_ENABLED}" != "0" ] && [ -n "${PROXY_POOL:-}${PROXY_POOL_LIST:-}${PROXIES:-}${PROXY_LIST:-}${SOLVER_PROXY:-}${CF_ARES_PROXY:-}${PROXY_POOL_FILE:-}" ]; then

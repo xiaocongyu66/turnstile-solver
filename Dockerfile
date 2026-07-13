@@ -93,7 +93,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         'curl_cffi>=0.5.7' \
         'requests>=2.28.0' \
         'seleniumbase>=4.0.0' \
-        'undetected-chromedriver>=3.5.0'
+        'undetected-chromedriver>=3.5.0' \
+        'selenium>=4.15.0' \
+        'cf-ares>=0.1.0' || pip install --no-cache-dir \
+        'playwright>=1.55' 'curl_cffi>=0.5.7' 'requests>=2.28.0' \
+        'seleniumbase>=4.0.0' 'undetected-chromedriver>=3.5.0' 'selenium>=4.15.0'
 
 # Offline install: bundled debs from vendor/chromium (Gitee jizijhj/chromium_1)
 COPY --from=source /src/app/vendor/chromium /opt/vendor/chromium
@@ -163,16 +167,20 @@ ENV PYTHONPATH=/app/worker:/app/vendor/CF-Ares \
     PROXY_RELAY_WORK_DIR=/tmp/solver-proxy-relay \
     PROXY_RELAY_ENABLED=1 \
     PROXY_RELAY_AUTO_INSTALL=1 \
-    CF_ARES=auto
+    CF_ARES=1 \
+    CF_ARES_BROWSER_ENGINE=undetected \
+    CF_ARES_HEADLESS=1 \
+    CF_ARES_TIMEOUT=60 \
+    CF_ARES_SESSION_DIR=/tmp/solver-cf-ares-sessions
 
 RUN chmod +x /entrypoint.sh /app/gateway/solver-gateway \
       /app/watchdog/solver-watchdog /app/util/solver-util \
       /app/worker/browser_worker.py \
-    && mkdir -p /app/logs /data/logs /tmp/solver-proxy-relay \
-    && test -d /app/vendor/CF-Ares/cf_ares \
-    && test -d /app/worker/vendor/CF-Ares/cf_ares \
-    && ls -la /app/vendor/CF-Ares /app/worker/vendor/CF-Ares \
-    && python -c "import sys; sys.path[:0]=['/app/vendor/CF-Ares','/app/worker']; import cf_ares, proxy_pool, cf_ares_helper as h; print('cf-ares+proxy_pool OK', getattr(cf_ares,'__version__', '?'), 'helper', h.available(), h._vendor_path())"
+    && mkdir -p /app/logs /data/logs /tmp/solver-proxy-relay /tmp/solver-cf-ares-sessions \
+    && (test -d /app/vendor/CF-Ares/cf_ares && echo "vendor CF-Ares OK" || echo "WARN: vendor CF-Ares missing — rely on pip cf-ares") \
+    && (test -d /app/worker/vendor/CF-Ares/cf_ares && echo "worker vendor OK" || true) \
+    && ls -la /app/vendor 2>/dev/null || true \
+    && python -c "import sys; sys.path[:0]=['/app/vendor/CF-Ares','/app/worker']; import cf_ares; print('cf_ares', getattr(cf_ares,'__version__','?')); import cf_ares_helper as h; d=h.diagnose(); print('diagnose', d); assert h.available() or d.get('error'); print('helper available', h.available())"
 
 EXPOSE 7860
 ENTRYPOINT ["/usr/bin/tini", "--"]

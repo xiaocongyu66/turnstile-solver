@@ -88,10 +88,11 @@ PROXY_TEST_WORKERS=8
 PROXY_TEST_ACCEPT_STATUS=200-399
 # PROXY_TEST_REQUIRE_OK=1   # 全部不通则禁用代理池（默认 fail-open 仍用未测通的）
 
-# 内置 CF-Ares（预热 cookies 再注入 Turnstile）
-CF_ARES=auto
-CF_ARES_BROWSER_ENGINE=auto
+# 内置 CF-Ares（官方 API: solve_challenge → cookies → Playwright 注入 Turnstile）
+CF_ARES=1
+CF_ARES_BROWSER_ENGINE=undetected
 CF_ARES_HEADLESS=1
+CF_ARES_TIMEOUT=60
 ```
 
 6. 打开 `https://<space>.hf.space/health` 应返回 `ok`

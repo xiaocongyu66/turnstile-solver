@@ -313,7 +313,7 @@ class BrowserWorker:
             log(f"id={self.worker_id} proxy_pool: {exc}")
             effective_proxy = (proxy or "").strip()
 
-        # Optional CF-Ares warm (clearance cookies) — runs in thread (sync selenium)
+        # CF-Ares official path: solve_challenge → get_session_info → cookies for Playwright
         ares_warm: dict[str, Any] = {}
         cf_mode = (os.environ.get("CF_ARES") or "auto").strip().lower()
         use_ares = cf_mode not in ("0", "false", "no", "off", "disabled")
@@ -322,11 +322,28 @@ class BrowserWorker:
                 import cf_ares_helper as _cah
 
                 if _cah.available():
-                    ares_warm = await asyncio.to_thread(
-                        _cah.warm_session, page_url, effective_proxy or None
+                    log(
+                        f"id={self.worker_id} CF-Ares solve_challenge "
+                        f"url={page_url[:60]} proxy={(effective_proxy or 'direct')[:40]}"
                     )
-                elif cf_mode in ("1", "true", "yes", "on", "always"):
-                    ares_warm = {"ok": False, "error": "cf-ares not available"}
+                    ares_warm = await asyncio.to_thread(
+                        _cah.solve_challenge,
+                        page_url,
+                        effective_proxy or None,
+                    )
+                    log(
+                        f"id={self.worker_id} CF-Ares done ok={ares_warm.get('ok')} "
+                        f"cookies={len(ares_warm.get('cookies') or [])} "
+                        f"status={ares_warm.get('status')} via={ares_warm.get('challenge')}"
+                    )
+                else:
+                    diag = _cah.diagnose()
+                    ares_warm = {
+                        "ok": False,
+                        "error": f"cf-ares unavailable: {diag.get('error') or 'import'}",
+                        "diag": diag,
+                    }
+                    log(f"id={self.worker_id} CF-Ares unavailable diag={diag}")
             except Exception as exc:
                 ares_warm = {"ok": False, "error": str(exc)[:200]}
                 log(f"id={self.worker_id} cf-ares warm error: {exc}")
