@@ -38,7 +38,7 @@ import (
 	"time"
 )
 
-const version = "0.3.0"
+const version = "0.3.1"
 
 type Job struct {
 	ID        string `json:"id"`
@@ -393,9 +393,10 @@ func (g *Gateway) startWorker(id int) (*workerProc, error) {
 	if g.proxyFile != "" {
 		cmd.Args = append(cmd.Args, "--proxy-file", g.proxyFile)
 	}
-	if g.prefetch {
-		cmd.Args = append(cmd.Args, "--prefetch")
-	}
+	// NOTE: do NOT pass --prefetch CLI flag. Worker --prefetch writes an unsolicited
+	// stdout line before the IPC loop; combined with the IPC prefetch below that
+	// desyncs the line protocol and makes the next solve read a leftover prefetch
+	// JSON (ok=true, empty value) → CAPTCHA_FAIL in ~browser-warm time.
 	cmd.Dir = g.workDir
 	// Own process group so gateway stop kills chromium grandchildren
 	if runtime.GOOS != "windows" {
@@ -443,7 +444,7 @@ func (g *Gateway) startWorker(id int) (*workerProc, error) {
 	fmt.Fprintf(os.Stderr, "[gateway] worker %d started pid=%d concurrency=%d\n",
 		id, cmd.Process.Pid, g.concurrency)
 
-	// async prefetch: warm browser + turnstile script in background
+	// async IPC-only prefetch: warm browser under the same mutex as solve
 	if g.prefetch {
 		go func(w *workerProc) {
 			w.mu.Lock()
@@ -453,15 +454,19 @@ func (g *Gateway) startWorker(id int) (*workerProc, error) {
 			}
 			req := workerReq{Cmd: "prefetch"}
 			if err := json.NewEncoder(w.stdin).Encode(req); err != nil {
+				fmt.Fprintf(os.Stderr, "[gateway] worker %d prefetch write: %v\n", w.id, err)
 				return
 			}
 			var resp workerResp
 			if err := w.stdout.Decode(&resp); err != nil {
+				fmt.Fprintf(os.Stderr, "[gateway] worker %d prefetch read: %v\n", w.id, err)
 				return
 			}
 			if resp.OK {
 				g.prefetchOK.Add(1)
 				fmt.Fprintf(os.Stderr, "[gateway] worker %d prefetch ok rss=%.1fMB\n", w.id, resp.RSSMB)
+			} else {
+				fmt.Fprintf(os.Stderr, "[gateway] worker %d prefetch fail: %s\n", w.id, resp.Error)
 			}
 		}(wp)
 	}
@@ -665,6 +670,7 @@ func (g *Gateway) workerLoop(id int) {
 
 			elapsed := time.Since(start).Seconds()
 			g.pending.Add(-1)
+			// Defensive: a leftover prefetch / pong line must never count as a solve.
 			if resp.OK && resp.Value != "" && g.tokenOK(resp.Value) {
 				failStreak = 0
 				g.solved.Add(1)
@@ -679,8 +685,14 @@ func (g *Gateway) workerLoop(id int) {
 				g.failed.Add(1)
 				errMsg := resp.Error
 				if errMsg == "" {
-					errMsg = "CAPTCHA_FAIL"
+					if resp.OK && resp.Value == "" {
+						errMsg = "empty token (possible IPC desync or CAPTCHA_FAIL)"
+					} else {
+						errMsg = "CAPTCHA_FAIL"
+					}
 				}
+				fmt.Fprintf(os.Stderr, "[gateway] worker %d solve fail id=%s err=%s elapsed=%.2fs\n",
+					id, job.ID, errMsg, elapsed)
 				g.putResult(&Result{
 					ID: job.ID, Status: "fail", Value: "CAPTCHA_FAIL",
 					Error: errMsg, ElapsedSec: elapsed, Worker: id,

@@ -123,17 +123,20 @@ RUN set -eux; \
       if [ -x "$c" ]; then CHROME="$c"; break; fi; \
     done; \
     if [ -n "$CHROME" ]; then \
-      echo "Installed system chromium: $CHROME"; \
+      echo "Installed system chromium (fallback): $CHROME"; \
       "$CHROME" --version || true; \
       ln -sf "$CHROME" /usr/local/bin/chromium-browser; \
       echo "$CHROME" > /etc/solver-chrome-path; \
     else \
-      echo "WARN: system chromium missing — Playwright fallback to /ms-playwright"; \
-      mkdir -p /ms-playwright; \
-      PLAYWRIGHT_BROWSERS_PATH=/ms-playwright python -m playwright install --with-deps chromium || \
-        PLAYWRIGHT_BROWSERS_PATH=/ms-playwright python -m playwright install chromium; \
-      find /ms-playwright -type f \( -name chrome -o -name chromium -o -name headless_shell \) 2>/dev/null | head -20; \
-    fi
+      echo "WARN: system chromium missing"; \
+    fi; \
+    # Always install modern Playwright Chromium — Turnstile rejects ancient 108-era
+    # chromium-browser debs. Worker prefers /ms-playwright over system chrome.
+    echo "Installing Playwright bundled chromium → /ms-playwright"; \
+    mkdir -p /ms-playwright; \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright python -m playwright install --with-deps chromium || \
+      PLAYWRIGHT_BROWSERS_PATH=/ms-playwright python -m playwright install chromium; \
+    find /ms-playwright -type f \( -name chrome -o -name chromium -o -name headless_shell \) 2>/dev/null | head -20
 
 WORKDIR /app
 COPY --from=source /src/app/worker /app/worker

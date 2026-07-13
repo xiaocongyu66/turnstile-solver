@@ -53,27 +53,41 @@ def malloc_trim() -> None:
         pass
 
 
-def find_chrome() -> str | None:
-    """Return chromium executable path, or None to let Playwright use its default."""
-    env = (
-        os.environ.get("SOLVER_CHROME_PATH")
-        or os.environ.get("CHROME_PATH")
-        or os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH")
-        or ""
-    ).strip()
-    if env and os.path.isfile(env):
-        return env
-    # Prefer Playwright's own resolved path (handles versioned dirs)
+def _playwright_bundled_chrome() -> str | None:
+    """Prefer modern Playwright-bundled Chromium (Turnstile rejects ancient 108)."""
     try:
         from playwright.sync_api import sync_playwright
 
         with sync_playwright() as p:
             path = p.chromium.executable_path
-            if path and os.path.isfile(path):
+            if path and os.path.isfile(path) and os.access(path, os.X_OK):
                 return path
     except Exception:
         pass
-    # System packages (Gitee chromium-browser.deb / distro chromium)
+    patterns = (
+        os.path.expanduser("~/.cache/ms-playwright/chromium-*/chrome-linux/chrome"),
+        os.path.expanduser("~/.cache/ms-playwright/chromium_headless_shell-*/chrome-linux/headless_shell"),
+        "/ms-playwright/chromium-*/chrome-linux/chrome",
+        "/ms-playwright/chromium-*/chrome-linux/chromium",
+        "/ms-playwright/chromium_headless_shell-*/chrome-linux/headless_shell",
+        "/root/.cache/ms-playwright/chromium-*/chrome-linux/chrome",
+        "/home/*/.cache/ms-playwright/chromium-*/chrome-linux/chrome",
+    )
+    found: list[str] = []
+    for pattern in patterns:
+        found.extend(glob.glob(pattern))
+    base = (os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or "/ms-playwright").strip()
+    if os.path.isdir(base):
+        found.extend(glob.glob(f"{base}/**/chrome", recursive=True))
+        found.extend(glob.glob(f"{base}/**/chromium", recursive=True))
+        found.extend(glob.glob(f"{base}/**/headless_shell", recursive=True))
+    found = [p for p in found if os.path.isfile(p) and os.access(p, os.X_OK)]
+    if found:
+        return sorted(found)[-1]
+    return None
+
+
+def _system_chrome() -> str | None:
     for c in (
         "/usr/bin/chromium-browser",
         "/usr/bin/chromium",
@@ -93,30 +107,46 @@ def find_chrome() -> str | None:
     paths = glob.glob(os.path.expanduser("~/.cloakbrowser/chromium-*/chrome"))
     if paths:
         return sorted(paths)[-1]
-    # Common Playwright install layouts (linux)
-    patterns = (
-        os.path.expanduser("~/.cache/ms-playwright/chromium-*/chrome-linux/chrome"),
-        os.path.expanduser("~/.cache/ms-playwright/chromium_headless_shell-*/chrome-linux/headless_shell"),
-        "/ms-playwright/chromium-*/chrome-linux/chrome",
-        "/ms-playwright/chromium-*/chrome-linux/chromium",
-        "/ms-playwright/chromium_headless_shell-*/chrome-linux/headless_shell",
-        "/root/.cache/ms-playwright/chromium-*/chrome-linux/chrome",
-        "/home/*/.cache/ms-playwright/chromium-*/chrome-linux/chrome",
-    )
-    found: list[str] = []
-    for pattern in patterns:
-        found.extend(glob.glob(pattern))
-    # recursive fallback under PLAYWRIGHT_BROWSERS_PATH
-    base = (os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or "/ms-playwright").strip()
-    if os.path.isdir(base):
-        found.extend(glob.glob(f"{base}/**/chrome", recursive=True))
-        found.extend(glob.glob(f"{base}/**/chromium", recursive=True))
-        found.extend(glob.glob(f"{base}/**/headless_shell", recursive=True))
-    # filter executables
-    found = [p for p in found if os.path.isfile(p) and os.access(p, os.X_OK)]
-    if found:
-        return sorted(found)[-1]
     return None
+
+
+def find_chrome() -> str | None:
+    """Return chromium executable path, or None to let Playwright use its default.
+
+    Order:
+      1. Explicit env (SOLVER_CHROME_PATH / CHROME_PATH / PLAYWRIGHT_…)
+      2. Playwright-bundled chromium under /ms-playwright (modern CF-friendly)
+      3. System / Gitee chromium-browser (often 108 — last resort)
+    """
+    env = (
+        os.environ.get("SOLVER_CHROME_PATH")
+        or os.environ.get("CHROME_PATH")
+        or os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH")
+        or ""
+    ).strip()
+    force_system = (os.environ.get("SOLVER_FORCE_SYSTEM_CHROME") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    # Explicit path always wins, unless it's the old Gitee 108 and we have a modern bundle
+    # and user did not force system chrome.
+    if env and os.path.isfile(env):
+        bundled = _playwright_bundled_chrome()
+        if (
+            not force_system
+            and bundled
+            and ("chromium-browser" in env or env.endswith("/chromium"))
+            and "ms-playwright" not in env
+        ):
+            log(f"prefer playwright chromium over system {env} → {bundled}")
+            return bundled
+        return env
+    bundled = _playwright_bundled_chrome()
+    if bundled:
+        return bundled
+    return _system_chrome()
 
 
 def read_cmd() -> Optional[dict[str, Any]]:
@@ -259,23 +289,44 @@ class BrowserWorker:
     ) -> tuple[str, dict[str, Any]]:
         """Open page, inject Turnstile widget, wait for token."""
         assert self.browser is not None
-        sitekey = sitekey or DEFAULT_SITEKEY
+        sitekey = (sitekey or "").strip() or DEFAULT_SITEKEY
+        # Escape for JS string literals
+        sk_js = sitekey.replace("\\", "\\\\").replace("'", "\\'")
         page_url = (url or "").strip() or DEFAULT_PAGE
         if "://" not in page_url:
             page_url = DEFAULT_PAGE
+        # CF Turnstile domain-bind: for non-x.ai hosts, inject on about:blank is safer
+        # than loading a page that does not host the sitekey (e.g. grok.com).
+        use_blank = (os.environ.get("SOLVER_INJECT_BLANK") or "1").strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+        host = ""
+        try:
+            from urllib.parse import urlparse as _up
 
-        # UA roughly match bundled chromium major when possible (108.x on Gitee debs)
+            host = (_up(page_url).hostname or "").lower()
+        except Exception:
+            host = ""
+        if use_blank and host and "x.ai" not in host and "accounts.x.ai" not in host:
+            # Keep page_url for logging; navigate to blank then set origin via set_content
+            navigate_url = "about:blank"
+        else:
+            navigate_url = page_url
+
         ua = (
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/108.0.5359.40 Safari/537.36"
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
         )
         context_kwargs: dict[str, Any] = {
             "viewport": {"width": 1280, "height": 800},
             "user_agent": ua,
             "ignore_https_errors": True,
+            "locale": "en-US",
         }
         if proxy:
-            # Playwright proxy: server= scheme://host:port, optional username/password
             from urllib.parse import urlparse
 
             u = urlparse(proxy)
@@ -290,55 +341,86 @@ class BrowserWorker:
 
         context = await self.browser.new_context(**context_kwargs)
         page = await context.new_page()
-        trace: dict[str, Any] = {}
+        trace: dict[str, Any] = {"page_url": page_url, "navigate": navigate_url, "sitekey": sitekey[:20]}
         t0 = time.time()
         try:
             try:
-                await page.goto(
-                    page_url,
-                    wait_until="domcontentloaded",
-                    timeout=min(45000, int(self.timeout * 1000)),
-                )
+                if navigate_url == "about:blank":
+                    await page.goto("about:blank", wait_until="domcontentloaded", timeout=15000)
+                    # Synthetic origin page so Turnstile has a document + body
+                    await page.set_content(
+                        f"""<!doctype html><html><head><meta charset=utf-8>
+<title>turnstile</title></head>
+<body style="margin:0;background:#fff">
+<div id="host"></div>
+<script>window.__solver_page={json.dumps(page_url)};</script>
+</body></html>""",
+                        wait_until="domcontentloaded",
+                    )
+                else:
+                    await page.goto(
+                        navigate_url,
+                        wait_until="domcontentloaded",
+                        timeout=min(45000, int(self.timeout * 1000)),
+                    )
             except Exception as goto_exc:
                 log(f"id={self.worker_id} goto failed: {goto_exc}; try about:blank inject")
                 await page.goto("about:blank", wait_until="domcontentloaded", timeout=15000)
+                await page.set_content(
+                    "<!doctype html><html><body style='margin:0'></body></html>",
+                    wait_until="domcontentloaded",
+                )
                 trace["goto_fallback"] = str(goto_exc)[:200]
             trace["goto_s"] = round(time.time() - t0, 3)
             t1 = time.time()
             await page.evaluate(
                 f"""() => {{
+  if(!document.body){{
+    document.documentElement.appendChild(document.createElement('body'));
+  }}
   var d=document.createElement('div');
   d.className='cf-turnstile';
-  d.setAttribute('data-sitekey','{sitekey}');
+  d.setAttribute('data-sitekey','{sk_js}');
   d.style.cssText='position:fixed;top:10px;left:10px;z-index:99999;background:white;padding:12px;border:2px solid red;border-radius:6px;width:300px;height:70px';
   document.body.appendChild(d);
+  var i=document.createElement('input');
+  i.type='hidden'; i.name='cf-turnstile-response'; i.id='cf-turnstile-response';
+  document.body.appendChild(i);
   function __r(){{
     if(!window.turnstile) return;
-    window.turnstile.render(d, {{
-      sitekey: '{sitekey}',
-      callback: function(t) {{
-        var i=document.querySelector('input[name="cf-turnstile-response"]');
-        if(!i){{ i=document.createElement('input'); i.type='hidden'; i.name='cf-turnstile-response'; document.body.appendChild(i); }}
-        i.value=t;
-      }}
-    }});
+    try {{
+      window.turnstile.render(d, {{
+        sitekey: '{sk_js}',
+        callback: function(t) {{
+          var el=document.querySelector('input[name="cf-turnstile-response"]');
+          if(!el){{ el=document.createElement('input'); el.type='hidden'; el.name='cf-turnstile-response'; document.body.appendChild(el); }}
+          el.value=t;
+          window.__cf_token=t;
+        }},
+        'error-callback': function(e) {{ window.__cf_err=String(e||'error'); }},
+        'expired-callback': function() {{ window.__cf_err='expired'; }}
+      }});
+    }} catch (e) {{ window.__cf_err=String(e); }}
   }}
   if(window.turnstile){{ __r(); }}
   else {{
     var s=document.createElement('script');
-    s.src='https://challenges.cloudflare.com/turnstile/v0/api.js';
-    s.onload=function(){{ setTimeout(__r, 800); }};
+    s.src='https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+    s.async=true;
+    s.onload=function(){{ setTimeout(__r, 400); }};
+    s.onerror=function(){{ window.__cf_err='api.js load failed'; }};
     document.head.appendChild(s);
   }}
 }}"""
             )
             trace["inject_s"] = round(time.time() - t1, 3)
 
-            # mouse nudge on widget center
+            # mouse nudge on widget center (after short delay for iframe)
+            await asyncio.sleep(0.8)
             try:
                 box = await page.evaluate(
                     """() => {
-                      const e = document.querySelector('.cf-turnstile');
+                      const e = document.querySelector('.cf-turnstile, iframe[src*="challenges.cloudflare"]');
                       if (!e) return null;
                       const r = e.getBoundingClientRect();
                       return {x: r.left + r.width/2, y: r.top + r.height/2};
@@ -347,27 +429,45 @@ class BrowserWorker:
                 if box:
                     x, y = float(box["x"]), float(box["y"])
                     await page.mouse.move(max(0, x - 20), max(0, y - 6))
-                    await page.mouse.move(x, y, steps=6)
+                    await page.mouse.move(x, y, steps=8)
                     await page.mouse.down()
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.06)
                     await page.mouse.up()
+                    await page.mouse.click(x, y, delay=40)
             except Exception:
                 pass
 
             t2 = time.time()
             token = ""
-            deadline = time.time() + max(15.0, self.timeout - 10)
+            deadline = time.time() + max(25.0, self.timeout - 5)
             while time.time() < deadline:
                 try:
                     token = await page.evaluate(
-                        'document.querySelector(\'input[name="cf-turnstile-response"]\')?.value||""'
+                        """() => {
+                          return window.__cf_token
+                            || document.querySelector('input[name="cf-turnstile-response"]')?.value
+                            || document.querySelector('#cf-turnstile-response')?.value
+                            || '';
+                        }"""
                     )
+                    if not token:
+                        err = await page.evaluate("() => window.__cf_err || ''")
+                        if err:
+                            trace["cf_err"] = str(err)[:200]
                 except Exception:
                     token = ""
                 if token and len(token) > 20:
                     break
-                await asyncio.sleep(0.35)
+                await asyncio.sleep(0.4)
             trace["wait_s"] = round(time.time() - t2, 3)
+            if not token:
+                try:
+                    trace["has_turnstile"] = await page.evaluate("() => !!window.turnstile")
+                    trace["iframe_n"] = await page.evaluate(
+                        "() => document.querySelectorAll('iframe').length"
+                    )
+                except Exception:
+                    pass
             return token or "", trace
         finally:
             try:
@@ -401,6 +501,10 @@ class BrowserWorker:
                 self.solves += 1
                 elapsed = time.time() - t0
                 if not token or len(str(token)) <= 10:
+                    log(
+                        f"id={self.worker_id} CAPTCHA_FAIL elapsed={elapsed:.1f}s "
+                        f"trace={json.dumps(trace, ensure_ascii=False)[:400]}"
+                    )
                     return {
                         "ok": False,
                         "id": job_id,
@@ -508,8 +612,19 @@ async def amain(argv: list[str] | None = None) -> int:
         f"max_solves={args.max_solves} conc={args.concurrency} backend=standalone"
     )
 
+    # CLI --prefetch only warms the browser; NEVER write to stdout here.
+    # Gateway owns the line protocol (IPC prefetch/solve). An unsolicited
+    # prefetch JSON desyncs the next solve decode → empty-token CAPTCHA_FAIL.
     if args.prefetch:
-        write_resp(await worker.prefetch())
+        try:
+            pref = await worker.prefetch()
+            log(
+                f"id={args.worker_id} cli-prefetch "
+                f"ok={pref.get('ok')} rss={pref.get('rss_mb')} "
+                f"err={pref.get('error') or ''}"
+            )
+        except Exception as exc:
+            log(f"id={args.worker_id} cli-prefetch failed: {exc}")
 
     loop = asyncio.get_running_loop()
     while True:
