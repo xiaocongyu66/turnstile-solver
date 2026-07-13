@@ -127,23 +127,24 @@ SOLVER_API_TOKEN=你的强随机串
 
 其余不填即全 auto。需要压测时再固定数字，例如 `SOLVER_GATEWAY_WORKERS=4`。
 
-## Chromium 来源
+## Chromium 来源（仓库内置离线包）
 
-镜像构建时优先从 Gitee 发行版安装系统 `chromium-browser`：
+`vendor/chromium/` 已打包 [jizijhj/chromium_1](https://gitee.com/jizijhj/chromium_1/releases) 的全部 deb（约 530MB）：
 
-- 发行页：https://gitee.com/jizijhj/chromium_1/releases  
-- 默认 tag：`22.04_amd64` / `22.04_arm64`（按构建架构）  
-- 包：`chromium-browser.deb` + `chromium-codecs-ffmpeg-extra.deb`  
-- 运行时：`SOLVER_CHROME_PATH`（如 `/usr/bin/chromium-browser`）
+| 目录 | 用途 |
+|------|------|
+| `22.04_amd64` / `22.04_arm64` | **默认**（按构建架构安装） |
+| `20.04_*` / `22.10_*` | 备用，可用 build-arg 切换 |
 
-可选 Docker build-arg：
+构建时 **只从仓库安装**，不再访问 Gitee。失败才回退 Playwright。
+
+可选：
 
 ```text
-CHROMIUM_GITEE_TAG=22.04_amd64
-CHROMIUM_GITEE_BASE=https://gitee.com/jizijhj/chromium_1/releases/download
+CHROMIUM_TAG=22.04_amd64
 ```
 
-Gitee 不可用时回退 Playwright 官方 chromium（`/ms-playwright`）。
+运行时：`SOLVER_CHROME_PATH`（通常 `/usr/bin/chromium-browser`）。
 
 ## License
 

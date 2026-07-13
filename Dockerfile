@@ -1,24 +1,21 @@
 # syntax=docker/dockerfile:1
 # Standalone Hybrid Turnstile Solver (Go + Rust + C++ + Python)
 #
-# HF Space 拉取方式：构建时 git clone 完整仓库，不依赖 Space 上传源码。
-# Chromium：优先从 Gitee 发行版安装 chromium-browser.deb（国内快、可复现），
-#           失败再回退 Playwright 官方 chromium。
+# HF Space 拉取方式：构建时 git clone 完整仓库（含 vendor/chromium 离线 deb）。
+# Chromium：优先安装仓库内置 Gitee chromium-browser.deb，不依赖构建时访问 Gitee。
 #
 #   REPO_URL 默认: https://github.com/xiaocongyu66/turnstile-solver.git
 #   REPO_REF 默认: main
-#   CHROMIUM_GITEE_TAG 默认: 22.04_amd64 | 22.04_arm64（按构建架构）
+#   CHROMIUM_TAG 默认: 22.04_amd64 | 22.04_arm64
 #
 # Hardware: ≥ 2 vCPU / 16 GB RAM recommended
 
 ARG PYTHON_VERSION=3.11-bookworm
 ARG REPO_URL=https://github.com/xiaocongyu66/turnstile-solver.git
 ARG REPO_REF=main
-# Override e.g. 20.04_amd64 / 22.04_arm64 — see https://gitee.com/jizijhj/chromium_1/releases
-ARG CHROMIUM_GITEE_BASE=https://gitee.com/jizijhj/chromium_1/releases/download
-ARG CHROMIUM_GITEE_TAG=
+ARG CHROMIUM_TAG=
 
-# ========== Stage 0: ALWAYS clone full GitHub source ==========
+# ========== Stage 0: ALWAYS clone full GitHub source (includes vendor/chromium) ==========
 FROM debian:bookworm-slim AS source
 ARG REPO_URL
 ARG REPO_REF
@@ -27,8 +24,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
+# Need full history depth only for files; large vendor/chromium is in the tree
 RUN set -eu; \
-    echo "Cloning ${REPO_URL} @ ${REPO_REF}"; \
+    echo "Cloning ${REPO_URL} @ ${REPO_REF} (full tree with vendor/chromium)"; \
     git clone --depth 1 --branch "${REPO_REF}" "${REPO_URL}" /src/app \
       || git clone --depth 1 "${REPO_URL}" /src/app; \
     cd /src/app && git checkout "${REPO_REF}" 2>/dev/null || true; \
@@ -37,6 +35,8 @@ RUN set -eu; \
     test -f /src/app/worker/browser_worker.py; \
     test -f /src/app/util/solver_util.cpp; \
     test -f /src/app/docker/entrypoint.sh; \
+    test -d /src/app/vendor/chromium; \
+    ls -la /src/app/vendor/chromium; \
     echo "Source OK: $(cd /src/app && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
 # ---------- Go gateway ----------
@@ -63,8 +63,7 @@ RUN g++ -O2 -std=c++17 -o /out/solver-util /src/solver_util.cpp
 
 # ---------- Runtime ----------
 FROM python:${PYTHON_VERSION}
-ARG CHROMIUM_GITEE_BASE
-ARG CHROMIUM_GITEE_TAG
+ARG CHROMIUM_TAG
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -78,7 +77,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    tini ca-certificates curl wget \
+    tini ca-certificates curl \
     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
     libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
     libgbm1 libasound2 libpango-1.0-0 libcairo2 libatspi2.0-0 \
@@ -86,11 +85,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir 'playwright>=1.55'
 
-# Install chromium-browser from Gitee release (jizijhj/chromium_1), then optional Playwright fallback.
-# Packages: chromium-browser.deb + chromium-codecs-ffmpeg-extra.deb (+ l10n optional)
+# Offline install: bundled debs from vendor/chromium (Gitee jizijhj/chromium_1)
+COPY --from=source /src/app/vendor/chromium /opt/vendor/chromium
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
-    tag="${CHROMIUM_GITEE_TAG}"; \
+    tag="${CHROMIUM_TAG}"; \
     if [ -z "$tag" ]; then \
       case "$arch" in \
         amd64) tag="22.04_amd64" ;; \
@@ -98,48 +97,38 @@ RUN set -eux; \
         *) tag="22.04_amd64" ;; \
       esac; \
     fi; \
-    base="${CHROMIUM_GITEE_BASE}/${tag}"; \
-    mkdir -p /tmp/chromium-debs; \
-    cd /tmp/chromium-debs; \
-    ok=0; \
-    for f in chromium-codecs-ffmpeg-extra.deb chromium-browser.deb; do \
-      echo "Downloading ${base}/${f}"; \
-      if curl -fL --retry 3 --retry-delay 2 -o "$f" "${base}/${f}"; then \
-        ok=1; \
-      else \
-        echo "WARN: download failed ${f}"; \
-      fi; \
-    done; \
-    # optional l10n — ignore failure
-    curl -fL --retry 2 -o chromium-browser-l10n.deb "${base}/chromium-browser-l10n.deb" || true; \
-    if [ "$ok" = "1" ] && [ -f chromium-browser.deb ]; then \
+    dir="/opt/vendor/chromium/${tag}"; \
+    echo "Installing offline chromium from ${dir}"; \
+    if [ ! -d "$dir" ]; then \
+      echo "WARN: missing ${dir}, trying any matching *_${arch}"; \
+      dir="$(ls -d /opt/vendor/chromium/*_${arch} 2>/dev/null | head -1 || true)"; \
+    fi; \
+    if [ -n "$dir" ] && [ -f "${dir}/chromium-browser.deb" ]; then \
+      cd "$dir"; \
       dpkg -i chromium-codecs-ffmpeg-extra.deb 2>/dev/null || true; \
-      dpkg -i chromium-browser.deb || apt-get update && apt-get install -y -f --no-install-recommends || true; \
+      dpkg -i chromium-browser.deb || true; \
       dpkg -i chromium-browser-l10n.deb 2>/dev/null || true; \
       apt-get update && apt-get install -y -f --no-install-recommends || true; \
       rm -rf /var/lib/apt/lists/*; \
     else \
-      echo "WARN: Gitee chromium debs unavailable — will try Playwright"; \
+      echo "WARN: no bundled chromium deb for arch=${arch}"; \
     fi; \
-    rm -rf /tmp/chromium-debs; \
-    # Resolve binary path for Playwright
     CHROME=""; \
     for c in \
       /usr/bin/chromium-browser \
       /usr/bin/chromium \
       /usr/lib/chromium-browser/chromium-browser \
       /usr/lib/chromium/chromium \
-      /snap/bin/chromium; do \
+      /usr/local/bin/chromium-browser; do \
       if [ -x "$c" ]; then CHROME="$c"; break; fi; \
     done; \
     if [ -n "$CHROME" ]; then \
       echo "Installed system chromium: $CHROME"; \
       "$CHROME" --version || true; \
       ln -sf "$CHROME" /usr/local/bin/chromium-browser; \
-      echo "export SOLVER_CHROME_PATH=$CHROME" > /etc/profile.d/solver-chrome.sh; \
       echo "$CHROME" > /etc/solver-chrome-path; \
     else \
-      echo "No system chromium — installing Playwright chromium to /ms-playwright"; \
+      echo "WARN: system chromium missing — Playwright fallback to /ms-playwright"; \
       mkdir -p /ms-playwright; \
       PLAYWRIGHT_BROWSERS_PATH=/ms-playwright python -m playwright install --with-deps chromium || \
         PLAYWRIGHT_BROWSERS_PATH=/ms-playwright python -m playwright install chromium; \

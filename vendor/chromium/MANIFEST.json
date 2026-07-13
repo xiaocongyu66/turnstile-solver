@@ -1,0 +1,97 @@
+{
+  "source": "https://gitee.com/jizijhj/chromium_1/releases",
+  "bundled_at": "2026-07-13T13:18:16Z",
+  "note": "Offline chromium-browser debs for Docker/HF; no download at build time",
+  "files": [
+    {
+      "path": "20.04_amd64/chromium-browser-l10n.deb",
+      "size": 5902052,
+      "sha256": "31e7ed7ea2e8eeb8a38f511ceadaf693f3cf1cb7493a313b5739ce880f78f933"
+    },
+    {
+      "path": "20.04_amd64/chromium-browser.deb",
+      "size": 92314140,
+      "sha256": "91d96969b0406305ba8da5d3b1f0be904979748c631ed5015d07ea1a47562f10"
+    },
+    {
+      "path": "20.04_amd64/chromium-codecs-ffmpeg-extra.deb",
+      "size": 1296500,
+      "sha256": "f2da9a5a7a9ce40c24c17af9b69b4d86c39cf38a3842e595b7c210ab9ec9d20f"
+    },
+    {
+      "path": "20.04_arm64/chromium-browser-l10n.deb",
+      "size": 5838464,
+      "sha256": "0b3feb76d9297143ae6ad3ce3dae976e1c329e1e51b8de75191b5f691e0912af"
+    },
+    {
+      "path": "20.04_arm64/chromium-browser.deb",
+      "size": 79093080,
+      "sha256": "ef77093106a70cb9d686bfdd9b9b853eff280c64f29123bba0003a641d9942d1"
+    },
+    {
+      "path": "20.04_arm64/chromium-codecs-ffmpeg-extra.deb",
+      "size": 1118488,
+      "sha256": "ca79bd359624f13ac4437d3dda5ab7abc66b530e026a8a485b12f4fac2cefa4c"
+    },
+    {
+      "path": "22.04_amd64/chromium-browser-l10n.deb",
+      "size": 5889588,
+      "sha256": "e2cd3a3bf4a897dd77ebc2f9501a7375404062c70b5a30f73e1e2889ccf889d5"
+    },
+    {
+      "path": "22.04_amd64/chromium-browser.deb",
+      "size": 91460116,
+      "sha256": "b1b0b22e2561a5b41c846ac5746cf1da0c1122c123cecc09f6eca27e66841dbb"
+    },
+    {
+      "path": "22.04_amd64/chromium-codecs-ffmpeg-extra.deb",
+      "size": 1299048,
+      "sha256": "05984e2eb347fc2808ce59c99a31b5b97aa3e12b3b0c4dd55b7fc743bf08ac8a"
+    },
+    {
+      "path": "22.04_arm64/chromium-browser-l10n.deb",
+      "size": 5314440,
+      "sha256": "3f0edc00218f12f64b6499bc1499a2775cb2622a55d59a579cc2d4506e512f07"
+    },
+    {
+      "path": "22.04_arm64/chromium-browser.deb",
+      "size": 79546600,
+      "sha256": "4fa3fa4cd102d6522fc8f3ddcd7058c1d467f4398aec11efe38c73731840bc07"
+    },
+    {
+      "path": "22.04_arm64/chromium-codecs-ffmpeg-extra.deb",
+      "size": 1111248,
+      "sha256": "a4782a1065c78b4acb1a629f369f3848ccab0bf3e0830b7edec32dc742cbb42f"
+    },
+    {
+      "path": "22.10_amd64/chromium-browser-l10n.deb",
+      "size": 5889580,
+      "sha256": "c65535f6cca6cce55b2b90a290456806681f6564543ca3bc9e560c172fc1a53d"
+    },
+    {
+      "path": "22.10_amd64/chromium-browser.deb",
+      "size": 91308428,
+      "sha256": "4c50d216101367c047921de0270f009d5d73449b99d742504be39afbe73fe18b"
+    },
+    {
+      "path": "22.10_amd64/chromium-codecs-ffmpeg-extra.deb",
+      "size": 1297504,
+      "sha256": "f22b0d239d61f90e1d6ae35687145770a78ce1e46dfe31b347c14210bf46fd5e"
+    },
+    {
+      "path": "22.10_arm64/chromium-browser-l10n.deb",
+      "size": 5221440,
+      "sha256": "d02407ab01bd2edb205e99267ae550b929ed91ce37b9984326f3328f0ea38c91"
+    },
+    {
+      "path": "22.10_arm64/chromium-browser.deb",
+      "size": 79531516,
+      "sha256": "8cc888eb1434ec091f51ac8257e625c956defbbbdcd5260726647d0047cf2867"
+    },
+    {
+      "path": "22.10_arm64/chromium-codecs-ffmpeg-extra.deb",
+      "size": 1103152,
+      "sha256": "7b491224e1abd16cc3e46c14eff056c621cad2ac7ae37755f4f37dc9b14c1b34"
+    }
+  ]
+}
