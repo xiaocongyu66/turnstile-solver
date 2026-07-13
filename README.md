@@ -55,8 +55,12 @@ curl -sS -H "Authorization: Bearer dev-token" \
 
 1. 新建 Space → **SDK: Docker**
 2. Hardware：**≥ 2 vCPU · 16 GB**（Chromium）
-3. 推送本仓库；或 Settings 里连到本 GitHub
-4. Secrets：
+3. **必须用完整 GitHub 仓库**（不要只上传一个 Dockerfile）  
+   - Settings → Repository 连到 `xiaocongyu66/turnstile-solver`  
+   - 或 `git push` 整个仓库到 Space  
+   - 若 Space 里只有 Dockerfile，构建会自动 **clone 本仓库 main**（见 Dockerfile `REPO_URL`）
+4. 构建日志里 Commit SHA 应接近 GitHub `main`（当前含 `watchdog/src/main.rs`）
+5. Secrets：
 
 ```text
 SOLVER_API_TOKEN=强随机串

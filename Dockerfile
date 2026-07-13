@@ -1,29 +1,65 @@
 # syntax=docker/dockerfile:1
-# Standalone Hybrid Turnstile Solver (Go gateway + Rust watchdog + C++ util + Python browser)
+# Standalone Hybrid Turnstile Solver (Go + Rust + C++ + Python)
 # Hugging Face Space: SDK=Docker, hardware ≥ 2 vCPU / 16 GB recommended
+#
+# IMPORTANT: Space must include the FULL repo (gateway/, watchdog/, util/, worker/).
+# If Space git only has this Dockerfile, set build to clone GitHub:
+#   REPO_URL=https://github.com/xiaocongyu66/turnstile-solver.git
+#   REPO_REF=main
 
 ARG PYTHON_VERSION=3.11-bookworm
+ARG REPO_URL=https://github.com/xiaocongyu66/turnstile-solver.git
+ARG REPO_REF=main
+
+# ========== Stage 0: Resolve full source tree ==========
+# Prefer build context; if watchdog/src missing (thin Space), clone from GitHub.
+FROM debian:bookworm-slim AS source
+ARG REPO_URL
+ARG REPO_REF
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /ctx
+# Copy everything the Space/build context provides
+COPY . /ctx/build-context/
+RUN set -eu; \
+    if [ -f /ctx/build-context/watchdog/src/main.rs ] \
+       && [ -f /ctx/build-context/gateway/main.go ] \
+       && [ -f /ctx/build-context/worker/browser_worker.py ]; then \
+      echo "Using build context (full tree)"; \
+      cp -a /ctx/build-context /src/app; \
+    else \
+      echo "Build context incomplete — cloning ${REPO_URL} @ ${REPO_REF}"; \
+      git clone --depth 1 --branch "${REPO_REF}" "${REPO_URL}" /src/app \
+        || git clone --depth 1 "${REPO_URL}" /src/app; \
+      cd /src/app && git checkout "${REPO_REF}" 2>/dev/null || true; \
+    fi; \
+    test -f /src/app/watchdog/src/main.rs; \
+    test -f /src/app/gateway/main.go; \
+    test -f /src/app/worker/browser_worker.py; \
+    test -f /src/app/util/solver_util.cpp; \
+    echo "Source OK: $(cd /src/app && git rev-parse --short HEAD 2>/dev/null || echo context)"
 
 # ---------- Go gateway ----------
 FROM golang:1.22-bookworm AS gobuild
 WORKDIR /src
-COPY gateway/go.mod gateway/main.go ./
-RUN go build -trimpath -ldflags='-s -w' -o /out/solver-gateway .
+COPY --from=source /src/app/gateway/go.mod /src/app/gateway/main.go ./
+RUN mkdir -p /out && go build -trimpath -ldflags='-s -w' -o /out/solver-gateway .
 
 # ---------- Rust watchdog ----------
 FROM rust:1-bookworm AS rustbuild
 WORKDIR /src
 RUN mkdir -p /out
-COPY watchdog/Cargo.toml ./
-COPY watchdog/src ./src
-# Generate lock on build if absent
+COPY --from=source /src/app/watchdog/Cargo.toml ./
+COPY --from=source /src/app/watchdog/Cargo.lock* ./
+COPY --from=source /src/app/watchdog/src ./src
 RUN cargo build --release && cp target/release/solver-watchdog /out/solver-watchdog
 
 # ---------- C++ util ----------
 FROM debian:bookworm-slim AS cppbuild
 RUN apt-get update && apt-get install -y --no-install-recommends g++ \
     && rm -rf /var/lib/apt/lists/* && mkdir -p /out
-COPY util/solver_util.cpp util/solver_util.hpp /src/
+COPY --from=source /src/app/util/solver_util.cpp /src/app/util/solver_util.hpp /src/
 RUN g++ -O2 -std=c++17 -o /out/solver-util /src/solver_util.cpp
 
 # ---------- Runtime ----------
@@ -52,8 +88,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && python -m playwright install-deps chromium || true
 
 WORKDIR /app
-COPY worker /app/worker
-COPY docker/entrypoint.sh /entrypoint.sh
+COPY --from=source /src/app/worker /app/worker
+COPY --from=source /src/app/docker/entrypoint.sh /entrypoint.sh
 COPY --from=gobuild /out/solver-gateway /app/gateway/solver-gateway
 COPY --from=rustbuild /out/solver-watchdog /app/watchdog/solver-watchdog
 COPY --from=cppbuild /out/solver-util /app/util/solver-util
