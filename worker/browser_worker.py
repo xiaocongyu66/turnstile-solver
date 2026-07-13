@@ -18,6 +18,7 @@ import resource
 import sys
 import time
 import traceback
+from pathlib import Path
 from typing import Any, Optional
 
 os.environ.setdefault("PYTHONMALLOC", "malloc")
@@ -72,6 +73,23 @@ def find_chrome() -> str | None:
                 return path
     except Exception:
         pass
+    # System packages (Gitee chromium-browser.deb / distro chromium)
+    for c in (
+        "/usr/bin/chromium-browser",
+        "/usr/bin/chromium",
+        "/usr/lib/chromium-browser/chromium-browser",
+        "/usr/lib/chromium/chromium",
+        "/usr/local/bin/chromium-browser",
+    ):
+        if os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    if os.path.isfile("/etc/solver-chrome-path"):
+        try:
+            c = Path("/etc/solver-chrome-path").read_text(encoding="utf-8").strip()
+            if c and os.path.isfile(c) and os.access(c, os.X_OK):
+                return c
+        except OSError:
+            pass
     paths = glob.glob(os.path.expanduser("~/.cloakbrowser/chromium-*/chrome"))
     if paths:
         return sorted(paths)[-1]

@@ -1,18 +1,22 @@
 # syntax=docker/dockerfile:1
 # Standalone Hybrid Turnstile Solver (Go + Rust + C++ + Python)
 #
-# HF Space 拉取方式（推荐）：
-#   Space 里只需本 Dockerfile（或连 GitHub 后自动同步）。
-#   构建时 ALWAYS git clone 完整仓库，不依赖 Space 上传 gateway/watchdog/worker。
+# HF Space 拉取方式：构建时 git clone 完整仓库，不依赖 Space 上传源码。
+# Chromium：优先从 Gitee 发行版安装 chromium-browser.deb（国内快、可复现），
+#           失败再回退 Playwright 官方 chromium。
 #
 #   REPO_URL 默认: https://github.com/xiaocongyu66/turnstile-solver.git
 #   REPO_REF 默认: main
+#   CHROMIUM_GITEE_TAG 默认: 22.04_amd64 | 22.04_arm64（按构建架构）
 #
-# Hardware: ≥ 2 vCPU / 16 GB RAM recommended (Chromium)
+# Hardware: ≥ 2 vCPU / 16 GB RAM recommended
 
 ARG PYTHON_VERSION=3.11-bookworm
 ARG REPO_URL=https://github.com/xiaocongyu66/turnstile-solver.git
 ARG REPO_REF=main
+# Override e.g. 20.04_amd64 / 22.04_arm64 — see https://gitee.com/jizijhj/chromium_1/releases
+ARG CHROMIUM_GITEE_BASE=https://gitee.com/jizijhj/chromium_1/releases/download
+ARG CHROMIUM_GITEE_TAG=
 
 # ========== Stage 0: ALWAYS clone full GitHub source ==========
 FROM debian:bookworm-slim AS source
@@ -59,6 +63,8 @@ RUN g++ -O2 -std=c++17 -o /out/solver-util /src/solver_util.cpp
 
 # ---------- Runtime ----------
 FROM python:${PYTHON_VERSION}
+ARG CHROMIUM_GITEE_BASE
+ARG CHROMIUM_GITEE_TAG
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -67,21 +73,78 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PROJECT_ROOT=/app \
     SOLVER_PYTHON=python \
     SOLVER_GATEWAY_WORKERS=auto \
-    SOLVER_GATEWAY_WORKERS_MAX=4 \
+    SOLVER_GATEWAY_WORKERS_MAX=auto \
     TURNSTILE_SOLVER_HEADLESS=1 \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    tini ca-certificates curl \
+    tini ca-certificates curl wget \
     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
     libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
     libgbm1 libasound2 libpango-1.0-0 libcairo2 libatspi2.0-0 \
     libx11-6 libx11-xcb1 libxcb1 libxext6 libxshmfence1 fonts-liberation \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir 'playwright>=1.55' \
-    && mkdir -p /ms-playwright \
-    && PLAYWRIGHT_BROWSERS_PATH=/ms-playwright python -m playwright install --with-deps chromium \
-    && ls -la /ms-playwright && find /ms-playwright -name chrome -o -name chromium -o -name headless_shell 2>/dev/null | head -20
+    && pip install --no-cache-dir 'playwright>=1.55'
+
+# Install chromium-browser from Gitee release (jizijhj/chromium_1), then optional Playwright fallback.
+# Packages: chromium-browser.deb + chromium-codecs-ffmpeg-extra.deb (+ l10n optional)
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    tag="${CHROMIUM_GITEE_TAG}"; \
+    if [ -z "$tag" ]; then \
+      case "$arch" in \
+        amd64) tag="22.04_amd64" ;; \
+        arm64) tag="22.04_arm64" ;; \
+        *) tag="22.04_amd64" ;; \
+      esac; \
+    fi; \
+    base="${CHROMIUM_GITEE_BASE}/${tag}"; \
+    mkdir -p /tmp/chromium-debs; \
+    cd /tmp/chromium-debs; \
+    ok=0; \
+    for f in chromium-codecs-ffmpeg-extra.deb chromium-browser.deb; do \
+      echo "Downloading ${base}/${f}"; \
+      if curl -fL --retry 3 --retry-delay 2 -o "$f" "${base}/${f}"; then \
+        ok=1; \
+      else \
+        echo "WARN: download failed ${f}"; \
+      fi; \
+    done; \
+    # optional l10n — ignore failure
+    curl -fL --retry 2 -o chromium-browser-l10n.deb "${base}/chromium-browser-l10n.deb" || true; \
+    if [ "$ok" = "1" ] && [ -f chromium-browser.deb ]; then \
+      dpkg -i chromium-codecs-ffmpeg-extra.deb 2>/dev/null || true; \
+      dpkg -i chromium-browser.deb || apt-get update && apt-get install -y -f --no-install-recommends || true; \
+      dpkg -i chromium-browser-l10n.deb 2>/dev/null || true; \
+      apt-get update && apt-get install -y -f --no-install-recommends || true; \
+      rm -rf /var/lib/apt/lists/*; \
+    else \
+      echo "WARN: Gitee chromium debs unavailable — will try Playwright"; \
+    fi; \
+    rm -rf /tmp/chromium-debs; \
+    # Resolve binary path for Playwright
+    CHROME=""; \
+    for c in \
+      /usr/bin/chromium-browser \
+      /usr/bin/chromium \
+      /usr/lib/chromium-browser/chromium-browser \
+      /usr/lib/chromium/chromium \
+      /snap/bin/chromium; do \
+      if [ -x "$c" ]; then CHROME="$c"; break; fi; \
+    done; \
+    if [ -n "$CHROME" ]; then \
+      echo "Installed system chromium: $CHROME"; \
+      "$CHROME" --version || true; \
+      ln -sf "$CHROME" /usr/local/bin/chromium-browser; \
+      echo "export SOLVER_CHROME_PATH=$CHROME" > /etc/profile.d/solver-chrome.sh; \
+      echo "$CHROME" > /etc/solver-chrome-path; \
+    else \
+      echo "No system chromium — installing Playwright chromium to /ms-playwright"; \
+      mkdir -p /ms-playwright; \
+      PLAYWRIGHT_BROWSERS_PATH=/ms-playwright python -m playwright install --with-deps chromium || \
+        PLAYWRIGHT_BROWSERS_PATH=/ms-playwright python -m playwright install chromium; \
+      find /ms-playwright -type f \( -name chrome -o -name chromium -o -name headless_shell \) 2>/dev/null | head -20; \
+    fi
 
 WORKDIR /app
 COPY --from=source /src/app/worker /app/worker
@@ -93,8 +156,7 @@ COPY --from=cppbuild /out/solver-util /app/util/solver-util
 RUN chmod +x /entrypoint.sh /app/gateway/solver-gateway \
       /app/watchdog/solver-watchdog /app/util/solver-util \
       /app/worker/browser_worker.py \
-    && mkdir -p /app/logs /data/logs \
-    && python -c "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); print('chromium', p.chromium.executable_path); p.stop()"
+    && mkdir -p /app/logs /data/logs
 
 EXPOSE 7860
 ENTRYPOINT ["/usr/bin/tini", "--"]
