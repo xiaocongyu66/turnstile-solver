@@ -26,6 +26,9 @@ export SOLVER_WATCHDOG_HARD_MB="${SOLVER_WATCHDOG_HARD_MB:-auto}"
 export SOLVER_WATCHDOG_INTERVAL_SEC="${SOLVER_WATCHDOG_INTERVAL_SEC:-auto}"
 export SOLVER_WATCHDOG_ATTACH="${SOLVER_WATCHDOG_ATTACH:-1}"
 export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/ms-playwright}"
+# HF Space often has a cgroup limit (~16G) while MemTotal shows the host (128G+).
+# Optional override if cgroup is hidden: SOLVER_MEMORY_LIMIT_MB=16384
+# export SOLVER_MEMORY_LIMIT_MB="${SOLVER_MEMORY_LIMIT_MB:-}"
 export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD="${PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD:-1}"
 
 # Prefer Gitee/system chromium-browser installed at image build

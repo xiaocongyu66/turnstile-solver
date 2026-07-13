@@ -213,45 +213,31 @@ type utilPressure struct {
 }
 
 func (g *Gateway) hostPressure() utilPressure {
-	if g.utilBin != "" {
-		out, err := exec.Command(g.utilBin, "pressure").CombinedOutput()
-		if err == nil {
-			var p utilPressure
-			if json.Unmarshal(out, &p) == nil && p.TotalKB > 0 {
-				g.utilOK = true
-				return p
+	// Prefer cgroup-aware accounting (HF Space ~16G limit on a huge host).
+	// Do NOT trust C++ util / raw MemTotal alone — they see the parent machine.
+	totalMB, availMB, usedMB, ok := containerMemoryMB()
+	if ok && totalMB > 0 {
+		pressure := 100
+		if totalMB > 0 {
+			pressure = int((usedMB * 100) / totalMB)
+			if pressure < 0 {
+				pressure = 0
+			}
+			if pressure > 100 {
+				pressure = 100
 			}
 		}
-	}
-	// fallback: read /proc/meminfo in Go
-	data, err := os.ReadFile("/proc/meminfo")
-	if err != nil {
-		return utilPressure{}
-	}
-	var total, avail, free, buffers, cached uint64
-	for _, line := range strings.Split(string(data), "\n") {
-		var key string
-		var val uint64
-		if _, err := fmt.Sscanf(line, "%s %d", &key, &val); err != nil {
-			continue
-		}
-		switch key {
-		case "MemTotal:":
-			total = val
-		case "MemAvailable:":
-			avail = val
-		case "MemFree:":
-			free = val
-		case "Buffers:":
-			buffers = val
-		case "Cached:":
-			cached = val
+		return utilPressure{
+			TotalKB:     uint64(totalMB) * 1024,
+			AvailableKB: uint64(availMB) * 1024,
+			UsedKB:      uint64(usedMB) * 1024,
+			Pressure:    pressure,
 		}
 	}
-	if avail == 0 {
-		avail = free + buffers + cached
-	}
-	used := uint64(0)
+	// last resort: /proc/meminfo only
+	total := memTotalHostMB()
+	avail := memAvailableHostMB()
+	used := 0
 	if total > avail {
 		used = total - avail
 	}
@@ -259,7 +245,12 @@ func (g *Gateway) hostPressure() utilPressure {
 	if total > 0 {
 		pressure = int((used * 100) / total)
 	}
-	return utilPressure{TotalKB: total, AvailableKB: avail, UsedKB: used, Pressure: pressure}
+	return utilPressure{
+		TotalKB:     uint64(total) * 1024,
+		AvailableKB: uint64(avail) * 1024,
+		UsedKB:      uint64(used) * 1024,
+		Pressure:    pressure,
+	}
 }
 
 func (g *Gateway) tokenOK(token string) bool {
@@ -834,7 +825,28 @@ func (g *Gateway) stats() Stats {
 	}
 }
 
-func memAvailableMB() int {
+func readUintFile(path string) (uint64, bool) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	s := strings.TrimSpace(string(b))
+	if s == "" || s == "max" {
+		return 0, false
+	}
+	// cgroup v2 may be "max" or a number
+	n, err := strconv.ParseUint(s, 10, 64)
+	if err != nil || n == 0 {
+		return 0, false
+	}
+	// treat absurdly large limits as unlimited
+	if n > 1<<60 {
+		return 0, false
+	}
+	return n, true
+}
+
+func memAvailableHostMB() int {
 	data, err := os.ReadFile("/proc/meminfo")
 	if err != nil {
 		return 0
@@ -854,7 +866,7 @@ func memAvailableMB() int {
 	return int(availKB / 1024)
 }
 
-func memTotalMB() int {
+func memTotalHostMB() int {
 	data, err := os.ReadFile("/proc/meminfo")
 	if err != nil {
 		return 0
@@ -874,33 +886,144 @@ func memTotalMB() int {
 	return int(totalKB / 1024)
 }
 
+// cgroupMemoryLimitBytes returns the container memory limit if set (HF Space, Docker).
+func cgroupMemoryLimitBytes() (uint64, bool) {
+	// cgroup v2
+	if n, ok := readUintFile("/sys/fs/cgroup/memory.max"); ok {
+		return n, true
+	}
+	// cgroup v1
+	if n, ok := readUintFile("/sys/fs/cgroup/memory/memory.limit_in_bytes"); ok {
+		// kernel often reports huge number when unlimited
+		if n > 1<<50 {
+			return 0, false
+		}
+		return n, true
+	}
+	// nested / docker scope
+	for _, p := range []string{
+		"/sys/fs/cgroup/memory.max",
+		"/sys/fs/cgroup/memory/memory.limit_in_bytes",
+	} {
+		if n, ok := readUintFile(p); ok {
+			return n, true
+		}
+	}
+	return 0, false
+}
+
+func cgroupMemoryCurrentBytes() (uint64, bool) {
+	if n, ok := readUintFile("/sys/fs/cgroup/memory.current"); ok {
+		return n, true
+	}
+	if n, ok := readUintFile("/sys/fs/cgroup/memory/memory.usage_in_bytes"); ok {
+		return n, true
+	}
+	return 0, false
+}
+
+// containerMemoryMB returns effective total/available/used for THIS container.
+// HF Spaces: host may show 128G MemTotal but Space is capped ~16G via cgroup.
+func containerMemoryMB() (totalMB, availMB, usedMB int, ok bool) {
+	hostTotal := memTotalHostMB()
+	hostAvail := memAvailableHostMB()
+	limitB, hasLimit := cgroupMemoryLimitBytes()
+	curB, hasCur := cgroupMemoryCurrentBytes()
+
+	// Optional explicit override (MB) for platforms that hide cgroup
+	if raw := strings.TrimSpace(os.Getenv("SOLVER_MEMORY_LIMIT_MB")); raw != "" && !isAutoEnv(raw) {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			hasLimit = true
+			limitB = uint64(n) * 1024 * 1024
+		}
+	}
+
+	if hasLimit && limitB > 0 {
+		totalMB = int(limitB / (1024 * 1024))
+		if totalMB < 256 {
+			totalMB = 256
+		}
+		usedMB = 0
+		if hasCur {
+			usedMB = int(curB / (1024 * 1024))
+		} else if hostTotal > 0 && hostAvail >= 0 {
+			// approximate: assume container sees host free but is capped
+			// used ≈ max(0, total - hostAvail) when hostAvail is the free pool
+			// better: used = total - min(hostAvail, total)
+			freeLike := hostAvail
+			if freeLike > totalMB {
+				// host free is larger than our cap — we are not the bottleneck
+				usedMB = max(0, totalMB/10) // small baseline
+			} else {
+				usedMB = max(0, totalMB-freeLike)
+			}
+		}
+		if usedMB > totalMB {
+			usedMB = totalMB
+		}
+		availMB = totalMB - usedMB
+		if availMB < 0 {
+			availMB = 0
+		}
+		// never report more free than host free
+		if hostAvail > 0 && availMB > hostAvail {
+			availMB = hostAvail
+			usedMB = totalMB - availMB
+		}
+		return totalMB, availMB, usedMB, true
+	}
+
+	// No cgroup limit: fall back to host meminfo, but clamp if env says so
+	if hostTotal > 0 {
+		return hostTotal, hostAvail, max(0, hostTotal-hostAvail), true
+	}
+	return 0, 0, 0, false
+}
+
+// memAvailableMB / memTotalMB: effective container view (for auto sizing).
+func memAvailableMB() int {
+	_, avail, _, ok := containerMemoryMB()
+	if ok {
+		return avail
+	}
+	return memAvailableHostMB()
+}
+
+func memTotalMB() int {
+	total, _, _, ok := containerMemoryMB()
+	if ok {
+		return total
+	}
+	return memTotalHostMB()
+}
+
 // isAutoEnv: empty / auto / 0 → automatic sizing
 func isAutoEnv(raw string) bool {
 	v := strings.TrimSpace(strings.ToLower(raw))
 	return v == "" || v == "auto" || v == "0"
 }
 
-// autoSoftHardMB picks per-browser RSS soft/hard limits from host RAM.
-// Small hosts get tighter budgets so workers recycle before OOM.
+// autoSoftHardMB picks per-browser RSS soft/hard limits from *container* RAM.
+// HF: use cgroup ~16G, not host 128G.
 func autoSoftHardMB() (soft, hard int) {
 	total := memTotalMB()
 	avail := memAvailableMB()
-	// base by total RAM class
+	// base by effective total (container limit)
 	switch {
-	case total >= 28000: // ~32G
+	case total >= 28000: // ~32G dedicated
 		soft, hard = 900, 1400
-	case total >= 14000: // ~16G HF
-		soft, hard = 750, 1200
+	case total >= 14000: // ~16G HF Space
+		soft, hard = 700, 1100
 	case total >= 7000: // ~8G
-		soft, hard = 600, 950
+		soft, hard = 550, 900
 	case total >= 3500:
-		soft, hard = 450, 750
+		soft, hard = 400, 700
 	default:
-		soft, hard = 350, 550
+		soft, hard = 320, 520
 	}
-	// if currently tight, pull soft down so recycle triggers earlier
+	// if currently tight inside the container, pull soft down
 	if avail > 0 && avail < soft*2 {
-		soft = max(300, avail/3)
+		soft = max(280, avail/4)
 		hard = max(soft+150, soft*3/2)
 	}
 	if hard <= soft {
@@ -1011,14 +1134,18 @@ func autoWorkers(softMB int) int {
 	if capN < 1 {
 		capN = 8
 	}
-	// allow "auto" for max as well
+	// allow "auto" for max as well — base on container total, not host free alone
 	if isAutoEnv(os.Getenv("SOLVER_GATEWAY_WORKERS_MAX")) {
-		// ~1 worker per 1.5–2GB available after reserve, capped by CPU
-		if availMB >= 12000 {
+		totalMB := memTotalMB()
+		// ~16G Space → max 3–4 browsers; leave room for OS + gateway
+		switch {
+		case totalMB >= 28000:
 			capN = min(cores, 8)
-		} else if availMB >= 6000 {
+		case totalMB >= 14000:
 			capN = min(cores, 4)
-		} else {
+		case totalMB >= 7000:
+			capN = min(cores, 3)
+		default:
 			capN = min(cores, 2)
 		}
 		if capN < 1 {
@@ -1333,9 +1460,11 @@ func main() {
 		ctx:          ctx,
 		cancel:       cancel,
 	}
+	hostTot, hostAv := memTotalHostMB(), memAvailableHostMB()
+	effTot, effAv, effUsed, _ := containerMemoryMB()
 	fmt.Fprintf(os.Stderr,
-		"[gateway] auto plan: cpus=%d mem_total=%dMB mem_avail=%dMB workers=%d conc=%d slots=%d queue=%d soft=%dMB hard=%dMB max_solves=%d timeout=%ds\n",
-		runtime.NumCPU(), memTotalMB(), memAvailableMB(),
+		"[gateway] auto plan: cpus=%d container_mem=%dMB (used=%d avail=%d) host_mem=%dMB (avail=%d) workers=%d conc=%d slots=%d queue=%d soft=%dMB hard=%dMB max_solves=%d timeout=%ds\n",
+		runtime.NumCPU(), effTot, effUsed, effAv, hostTot, hostAv,
 		g.workers, g.concurrency, g.workers*g.concurrency, qSize,
 		g.softMB, g.hardMB, g.maxSolves, timeoutSec,
 	)
