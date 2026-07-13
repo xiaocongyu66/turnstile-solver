@@ -70,14 +70,41 @@ export PROXY_RELAY_ENABLED="${PROXY_RELAY_ENABLED:-1}"
 export PROXY_RELAY_AUTO_INSTALL="${PROXY_RELAY_AUTO_INSTALL:-1}"
 export PROXY_RELAY_WORK_DIR="${PROXY_RELAY_WORK_DIR:-/tmp/solver-proxy-relay}"
 export PROXY_POOL_STRATEGY="${PROXY_POOL_STRATEGY:-round_robin}"
+export PROXY_TEST_ENABLED="${PROXY_TEST_ENABLED:-1}"
+export PROXY_TEST_URLS="${PROXY_TEST_URLS:-https://accounts.x.ai/sign-up?redirect=grok-com,https://x.ai/}"
+export PROXY_TEST_TIMEOUT="${PROXY_TEST_TIMEOUT:-12}"
+export PROXY_TEST_WORKERS="${PROXY_TEST_WORKERS:-8}"
+export PROXY_TEST_ACCEPT_STATUS="${PROXY_TEST_ACCEPT_STATUS:-200-399}"
+export PROXY_TEST_STATE_FILE="${PROXY_TEST_STATE_FILE:-/tmp/solver-proxy-test.json}"
+export PROXY_TEST_CACHE_SEC="${PROXY_TEST_CACHE_SEC:-300}"
 mkdir -p "${PROXY_RELAY_WORK_DIR}" 2>/dev/null || true
 
 _proxy_hint="(empty — set PROXY_POOL for residential/ISP)"
 if [ -n "${PROXY_POOL:-}${PROXY_POOL_LIST:-}${PROXIES:-}${PROXY_LIST:-}${SOLVER_PROXY:-}${CF_ARES_PROXY:-}" ]; then
   _proxy_hint="configured (PROXY_POOL / SOLVER_PROXY)"
 fi
-echo "🌐 proxy: ${_proxy_hint}  strategy=${PROXY_POOL_STRATEGY}  relay=${PROXY_RELAY_ENABLED}"
+echo "🌐 proxy: ${_proxy_hint}  strategy=${PROXY_POOL_STRATEGY}  relay=${PROXY_RELAY_ENABLED}  test=${PROXY_TEST_ENABLED}"
 echo "🛡️  CF_ARES=${CF_ARES}  path=${CF_ARES_PATH}"
+
+# Auto-test proxies can reach accounts.x.ai / x.ai (shared state for workers)
+if [ "${PROXY_TEST_ENABLED}" != "0" ] && [ -n "${PROXY_POOL:-}${PROXY_POOL_LIST:-}${PROXIES:-}${PROXY_LIST:-}${SOLVER_PROXY:-}${CF_ARES_PROXY:-}${PROXY_POOL_FILE:-}" ]; then
+  echo "🔎 Testing proxies → xAI (timeout=${PROXY_TEST_TIMEOUT}s workers=${PROXY_TEST_WORKERS})..."
+  python -c "
+import json, sys
+sys.path[:0] = ['/app/worker', '/app/vendor/CF-Ares']
+import proxy_pool
+st = proxy_pool.boot_test()
+print(json.dumps({
+  'active': st.get('active_count'),
+  'total': st.get('count'),
+  'ok': st.get('test_ok'),
+  'fail': st.get('test_fail'),
+  'preview': st.get('items_preview'),
+}, ensure_ascii=False))
+" || echo "⚠️  proxy boot test failed (workers will retry)"
+else
+  echo "🔎 proxy test skipped (no PROXY_POOL or PROXY_TEST_ENABLED=0)"
+fi
 
 echo "  auto: workers=${SOLVER_GATEWAY_WORKERS} max=${SOLVER_GATEWAY_WORKERS_MAX} soft=${SOLVER_WATCHDOG_SOFT_MB} hard=${SOLVER_WATCHDOG_HARD_MB}"
 echo "🚀 Starting solver-gateway..."

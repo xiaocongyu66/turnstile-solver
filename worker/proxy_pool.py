@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Multi-proxy pool + share-link / SOCKS-auth → local HTTP relay for Chromium.
+"""Multi-proxy pool + share-link / SOCKS-auth → local HTTP relay + xAI reachability test.
 
 Env (HF Secrets / docker):
   PROXY_POOL / PROXY_POOL_LIST / PROXIES / PROXY_LIST
@@ -13,29 +13,44 @@ Env (HF Secrets / docker):
   PROXY_RELAY_ENABLED      1 (default) convert share-links / socks5-auth
   PROXY_RELAY_AUTO_INSTALL 1 auto-download sing-box if missing
   PROXY_RELAY_WORK_DIR     /tmp/solver-proxy-relay
-  PROXY_RELAY_START_PORT   19080
-  PROXY_RELAY_MAX_NODES    48
   SOLVER_PROXY             single override (also CF_ARES_PROXY / HTTPS_PROXY)
+
+  # Auto test (reach accounts.x.ai through each proxy)
+  PROXY_TEST_ENABLED       1 (default) test before use
+  PROXY_TEST_URLS          default https://accounts.x.ai/sign-up?redirect=grok-com
+  PROXY_TEST_TIMEOUT       12 seconds
+  PROXY_TEST_WORKERS       8 concurrent probes
+  PROXY_TEST_ACCEPT_STATUS 200-399 (also tolerate 403/503 with CF body)
+  PROXY_TEST_REQUIRE_OK    0 if 1 and none pass → empty pool (fail closed)
+  PROXY_TEST_CACHE_SEC     300 retest interval
+  PROXY_TEST_STATE_FILE    /tmp/solver-proxy-test.json  shared by workers
 """
 from __future__ import annotations
 
+import json
 import os
 import random
 import re
+import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import quote, unquote, urlparse
 
 from proxy_relay import BuiltinProxyRelay, BuiltinProxyRelayConfig
 
 _LOCK = threading.Lock()
-_CACHE: dict = {
+_CACHE: dict[str, Any] = {
     "sig": None,
-    "items": (),
+    "raw_sig": None,
+    "items": (),          # all converted browser proxies
+    "active": (),         # tested-ok subset (or all if test off)
     "index": 0,
     "relay": None,
+    "test": {},           # last test summary
+    "tested_at": 0.0,
 }
 _SHARE_SCHEMES = (
     "vmess",
@@ -91,7 +106,6 @@ def _env_proxy_text() -> str:
 def _split_proxy_text(raw: str) -> list[str]:
     if not raw:
         return []
-    # Prefer line splits; also allow , ; |
     chunks: list[str] = []
     for part in re.split(r"[\n,;|]+", raw):
         line = (part or "").strip()
@@ -133,7 +147,6 @@ def _telegram_socks_to_url(text: str) -> Optional[str]:
 
 
 def _needs_relay(proxy: str) -> bool:
-    """Chromium cannot use SOCKS5 with user/pass; share-links need sing-box."""
     try:
         parsed = urlparse((proxy or "").strip())
     except Exception:
@@ -206,7 +219,6 @@ def _to_browser_proxy(raw: str) -> Optional[str]:
 
     scheme = _share_link_scheme(line)
     if scheme in _SHARE_SCHEMES or _needs_relay(line):
-        # keep share-link / socks-auth as-is for relay import
         if scheme in {"vmess", "vless", "trojan", "ss", "hy2", "hysteria2", "tuic", "anytls"}:
             pass
         elif scheme in {"socks", "socks5", "socks5h"} and not _needs_relay(line):
@@ -247,7 +259,6 @@ def _load_raw_lines() -> list[str]:
                     lines.append(s)
         except OSError as exc:
             log(f"PROXY_POOL_FILE read fail: {exc}")
-    # de-dupe preserve order
     seen = set()
     out = []
     for x in lines:
@@ -261,33 +272,388 @@ def _sig(raw_lines: list[str]) -> str:
     return f"{len(raw_lines)}:{hash(tuple(raw_lines))}"
 
 
-def load_browser_proxies(*, force: bool = False) -> list[str]:
-    """Return Chromium-safe proxy URLs (may start local relays)."""
+# ── xAI reachability test ──────────────────────────────────────────
+
+
+def _test_urls() -> list[str]:
+    raw = (
+        os.environ.get("PROXY_TEST_URLS")
+        or os.environ.get("PROXY_AUTO_TEST_URLS")
+        or ""
+    ).strip()
+    if raw:
+        urls = [u.strip() for u in re.split(r"[\n,;]+", raw) if u.strip()]
+        if urls:
+            return urls
+    return [
+        "https://accounts.x.ai/sign-up?redirect=grok-com",
+        "https://x.ai/",
+    ]
+
+
+def _parse_status_ranges(text: str) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    for part in re.split(r"[,;\s]+", (text or "").strip()):
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            try:
+                ranges.append((int(a), int(b)))
+            except ValueError:
+                continue
+        else:
+            try:
+                v = int(part)
+                ranges.append((v, v))
+            except ValueError:
+                continue
+    return ranges or [(200, 399)]
+
+
+def _status_ok(code: int, ranges: list[tuple[int, int]]) -> bool:
+    for a, b in ranges:
+        if a <= code <= b:
+            return True
+    # Cloudflare interstitial often means proxy reached the edge
+    if code in (403, 503):
+        return True
+    return False
+
+
+def _state_path() -> Path:
+    raw = (
+        os.environ.get("PROXY_TEST_STATE_FILE")
+        or "/tmp/solver-proxy-test.json"
+    ).strip()
+    return Path(raw).expanduser()
+
+
+def _probe_one(proxy: str, url: str, timeout: float) -> dict[str, Any]:
+    """Return {ok, status, ms, error, url, method}."""
+    t0 = time.time()
+    result: dict[str, Any] = {
+        "proxy": proxy,
+        "url": url,
+        "ok": False,
+        "status": 0,
+        "ms": 0,
+        "error": "",
+        "method": "",
+    }
+    # Prefer curl (handles http + socks5 cleanly in container)
+    try:
+        cmd = [
+            "curl",
+            "-sS",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "-L",
+            "--max-time",
+            str(max(1, int(timeout))),
+            "--connect-timeout",
+            str(max(1, min(10, int(timeout)))),
+            "-A",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "-x",
+            proxy,
+            url,
+        ]
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout + 3,
+            check=False,
+        )
+        result["method"] = "curl"
+        code_s = (proc.stdout or "").strip()
+        try:
+            code = int(code_s) if code_s.isdigit() else 0
+        except ValueError:
+            code = 0
+        result["status"] = code
+        result["ms"] = int((time.time() - t0) * 1000)
+        if proc.returncode != 0 and code == 0:
+            result["error"] = (proc.stderr or f"curl exit {proc.returncode}")[:160]
+            return result
+        result["ok"] = code > 0  # refined by caller with accept ranges
+        return result
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        result["error"] = f"curl: {exc}"[:160]
+
+    # Fallback: requests / urllib (http proxies mainly)
+    try:
+        import requests
+
+        result["method"] = "requests"
+        r = requests.get(
+            url,
+            proxies={"http": proxy, "https": proxy},
+            timeout=timeout,
+            allow_redirects=True,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                )
+            },
+        )
+        result["status"] = int(r.status_code)
+        result["ms"] = int((time.time() - t0) * 1000)
+        result["ok"] = True
+        return result
+    except Exception as exc:
+        result["error"] = str(exc)[:160]
+        result["ms"] = int((time.time() - t0) * 1000)
+        return result
+
+
+def test_proxy(proxy: str) -> dict[str, Any]:
+    """Test one browser proxy against configured xAI URLs."""
+    timeout = float(_env_int("PROXY_TEST_TIMEOUT", 12))
+    ranges = _parse_status_ranges(
+        os.environ.get("PROXY_TEST_ACCEPT_STATUS")
+        or os.environ.get("PROXY_AUTO_TEST_ACCEPT_STATUS")
+        or "200-399"
+    )
+    last: dict[str, Any] = {"proxy": proxy, "ok": False, "error": "no url"}
+    for url in _test_urls():
+        r = _probe_one(proxy, url, timeout)
+        r["ok"] = bool(r.get("status")) and _status_ok(int(r.get("status") or 0), ranges)
+        last = r
+        if r["ok"]:
+            return r
+    return last
+
+
+def _load_state_file() -> Optional[dict[str, Any]]:
+    path = _state_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return None
+
+
+def _save_state_file(payload: dict[str, Any]) -> None:
+    path = _state_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        tmp.replace(path)
+    except OSError as exc:
+        log(f"state write fail: {exc}")
+
+
+def _file_lock_path() -> Path:
+    return _state_path().with_suffix(".lock")
+
+
+def _with_file_lock(fn):
+    """Simple flock so multi-worker boot does one test only."""
+    import fcntl
+
+    lock_path = _file_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+", encoding="utf-8") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            return fn()
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+def test_proxies(
+    proxies: list[str],
+    *,
+    force: bool = False,
+) -> tuple[list[str], dict[str, Any]]:
+    """Concurrent test; returns (ok_list, summary). Uses shared state file."""
+    if not proxies:
+        summary = {
+            "total": 0,
+            "ok": 0,
+            "fail": 0,
+            "active": [],
+            "tested_at": time.time(),
+            "urls": _test_urls(),
+            "skipped": True,
+            "reason": "empty pool",
+        }
+        return [], summary
+
+    cache_sec = max(30, _env_int("PROXY_TEST_CACHE_SEC", 300))
+    raw_sig = _sig(proxies)
+
+    def _do() -> tuple[list[str], dict[str, Any]]:
+        if not force:
+            st = _load_state_file()
+            if st and st.get("raw_sig") == raw_sig:
+                age = time.time() - float(st.get("tested_at") or 0)
+                if age < cache_sec and isinstance(st.get("active"), list):
+                    active = [str(x) for x in st["active"] if x]
+                    log(
+                        f"reuse test cache age={int(age)}s ok={len(active)}/{st.get('total', '?')}"
+                    )
+                    return active, st
+
+        workers = max(1, min(32, _env_int("PROXY_TEST_WORKERS", 8)))
+        log(f"testing {len(proxies)} proxy(ies) → xAI  workers={workers} ...")
+        results: list[dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futs = {ex.submit(test_proxy, p): p for p in proxies}
+            for fut in as_completed(futs):
+                try:
+                    r = fut.result()
+                except Exception as exc:
+                    r = {
+                        "proxy": futs[fut],
+                        "ok": False,
+                        "error": str(exc)[:160],
+                        "status": 0,
+                        "ms": 0,
+                    }
+                results.append(r)
+                mark = "OK" if r.get("ok") else "FAIL"
+                log(
+                    f"  [{mark}] status={r.get('status')} {r.get('ms')}ms "
+                    f"{(r.get('proxy') or '')[:40]} "
+                    f"{r.get('error') or ''}"
+                )
+
+        active = [str(r["proxy"]) for r in results if r.get("ok") and r.get("proxy")]
+        # preserve original order
+        order = {p: i for i, p in enumerate(proxies)}
+        active.sort(key=lambda p: order.get(p, 9999))
+
+        summary: dict[str, Any] = {
+            "total": len(proxies),
+            "ok": len(active),
+            "fail": len(proxies) - len(active),
+            "active": active,
+            "tested_at": time.time(),
+            "raw_sig": raw_sig,
+            "urls": _test_urls(),
+            "results": [
+                {
+                    "proxy": (r.get("proxy") or "")[:80],
+                    "ok": bool(r.get("ok")),
+                    "status": r.get("status"),
+                    "ms": r.get("ms"),
+                    "error": (r.get("error") or "")[:120],
+                    "url": r.get("url"),
+                }
+                for r in results
+            ],
+        }
+        _save_state_file(summary)
+        log(f"test done: ok={len(active)} fail={summary['fail']} / {len(proxies)}")
+        return active, summary
+
+    try:
+        return _with_file_lock(_do)
+    except Exception as exc:
+        # flock unavailable? run unlocked
+        log(f"file lock fallback: {exc}")
+        return _do()
+
+
+def load_browser_proxies(*, force: bool = False, test: Optional[bool] = None) -> list[str]:
+    """Return usable browser proxies (tested against xAI when enabled)."""
     raw = _load_raw_lines()
     sig = _sig(raw)
+    do_test = _env_bool("PROXY_TEST_ENABLED", True) if test is None else bool(test)
+
     with _LOCK:
-        if not force and _CACHE.get("sig") == sig and _CACHE.get("items") is not None:
-            return list(_CACHE["items"])
+        cache_hit = (
+            not force
+            and _CACHE.get("raw_sig") == sig
+            and _CACHE.get("active") is not None
+            and _CACHE.get("items") is not None
+        )
+        if cache_hit:
+            return list(_CACHE["active"] or _CACHE["items"])
+
         items: list[str] = []
         for line in raw:
             p = _to_browser_proxy(line)
             if p and p not in items:
                 items.append(p)
-        _CACHE["sig"] = sig
+        _CACHE["raw_sig"] = sig
         _CACHE["items"] = tuple(items)
         _CACHE["index"] = 0
         log(f"loaded {len(items)} browser proxy(ies) from {len(raw)} line(s)")
+
+    if not items:
+        with _LOCK:
+            _CACHE["active"] = ()
+            _CACHE["test"] = {"total": 0, "ok": 0, "fail": 0}
+        return []
+
+    if not do_test:
+        with _LOCK:
+            _CACHE["active"] = tuple(items)
+            _CACHE["test"] = {
+                "total": len(items),
+                "ok": len(items),
+                "fail": 0,
+                "skipped": True,
+            }
         return list(items)
+
+    active, summary = test_proxies(items, force=force)
+    require = _env_bool("PROXY_TEST_REQUIRE_OK", False)
+    if not active and not require:
+        # fail-open: keep all converted proxies but mark test failed
+        log("WARN: no proxy passed xAI test — using untested pool (set PROXY_TEST_REQUIRE_OK=1 to fail closed)")
+        use = items
+    else:
+        use = active
+
+    with _LOCK:
+        _CACHE["active"] = tuple(use)
+        _CACHE["test"] = summary
+        _CACHE["tested_at"] = float(summary.get("tested_at") or time.time())
+        _CACHE["sig"] = sig
+    return list(use)
+
+
+def boot_test() -> dict[str, Any]:
+    """Called from entrypoint: convert + test, print summary, return stats."""
+    items = load_browser_proxies(force=True, test=_env_bool("PROXY_TEST_ENABLED", True))
+    st = pool_stats()
+    log(
+        f"boot: active={st.get('active_count')} total={st.get('count')} "
+        f"test_ok={st.get('test_ok')} test_fail={st.get('test_fail')}"
+    )
+    return st
 
 
 def pick_proxy(*, explicit: str = "") -> Optional[str]:
     """Pick one proxy. Request-level `explicit` wins; else pool strategy."""
     if (explicit or "").strip():
         p = _to_browser_proxy(explicit.strip())
+        # optional quick test for explicit?
+        if p and _env_bool("PROXY_TEST_EXPLICIT", False):
+            r = test_proxy(p)
+            if not r.get("ok"):
+                log(f"explicit proxy failed xAI test: {r}")
+                return None
         return p or explicit.strip()
     items = load_browser_proxies()
     if not items:
-        # fall back single env
         single = (
             os.environ.get("SOLVER_PROXY")
             or os.environ.get("CF_ARES_PROXY")
@@ -321,7 +687,6 @@ def playwright_proxy_dict(proxy_url: str) -> Optional[dict]:
     if not port:
         port = 443 if u.scheme == "https" else 80
     server = f"{u.scheme}://{u.hostname}:{port}"
-    # Playwright only supports http/socks5 server schemes
     if u.scheme in ("https",):
         server = f"http://{u.hostname}:{port}"
     if u.scheme == "socks5h":
@@ -335,10 +700,27 @@ def playwright_proxy_dict(proxy_url: str) -> Optional[dict]:
 
 
 def pool_stats() -> dict:
-    items = load_browser_proxies()
+    items_all = list(_CACHE.get("items") or ())
+    if not items_all and not _CACHE.get("raw_sig"):
+        # trigger load without re-forcing full test if cache empty
+        load_browser_proxies()
+        items_all = list(_CACHE.get("items") or ())
+    active = list(_CACHE.get("active") or ())
+    test = _CACHE.get("test") or {}
     return {
-        "count": len(items),
+        "count": len(items_all),
+        "active_count": len(active),
         "strategy": (os.environ.get("PROXY_POOL_STRATEGY") or "round_robin"),
         "relay_enabled": _env_bool("PROXY_RELAY_ENABLED", True),
-        "items_preview": [p[:48] for p in items[:5]],
+        "test_enabled": _env_bool("PROXY_TEST_ENABLED", True),
+        "test_ok": int(test.get("ok") or 0),
+        "test_fail": int(test.get("fail") or 0),
+        "test_urls": test.get("urls") or _test_urls(),
+        "items_preview": [p[:48] for p in (active or items_all)[:5]],
     }
+
+
+if __name__ == "__main__":
+    # CLI: python proxy_pool.py  → boot test
+    st = boot_test()
+    print(json.dumps(st, ensure_ascii=False, indent=2))

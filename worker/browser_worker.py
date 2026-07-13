@@ -667,17 +667,25 @@ async def amain(argv: list[str] | None = None) -> int:
         concurrency=args.concurrency,
         headless=headless,
     )
-    # Proxy pool + CF-Ares status at boot
+    # Proxy pool + CF-Ares status at boot (reuse entrypoint test cache when present)
     proxy_n = 0
+    proxy_active = 0
     ares_ok = False
     try:
         import proxy_pool as _pp
 
         if args.proxy_file and not os.environ.get("PROXY_POOL_FILE"):
             os.environ["PROXY_POOL_FILE"] = args.proxy_file
+        # load_browser_proxies reuses /tmp/solver-proxy-test.json if fresh
+        _pp.load_browser_proxies(force=False)
         st = _pp.pool_stats()
         proxy_n = int(st.get("count") or 0)
-        log(f"id={args.worker_id} proxy_pool count={proxy_n} strategy={st.get('strategy')}")
+        proxy_active = int(st.get("active_count") or 0)
+        log(
+            f"id={args.worker_id} proxy_pool total={proxy_n} active={proxy_active} "
+            f"test_ok={st.get('test_ok')} test_fail={st.get('test_fail')} "
+            f"strategy={st.get('strategy')}"
+        )
     except Exception as exc:
         log(f"id={args.worker_id} proxy_pool init: {exc}")
     try:
@@ -691,7 +699,7 @@ async def amain(argv: list[str] | None = None) -> int:
     log(
         f"ready id={args.worker_id} soft={args.soft_mb} hard={args.hard_mb} "
         f"max_solves={args.max_solves} conc={args.concurrency} backend=standalone "
-        f"proxies={proxy_n} cf_ares={ares_ok}"
+        f"proxies={proxy_active}/{proxy_n} cf_ares={ares_ok}"
     )
 
     # CLI --prefetch only warms the browser; NEVER write to stdout here.

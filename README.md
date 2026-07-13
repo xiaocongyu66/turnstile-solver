@@ -80,6 +80,14 @@ PROXY_RELAY_ENABLED=1
 PROXY_RELAY_AUTO_INSTALL=1
 PROXY_POOL_STRATEGY=round_robin
 
+# 启动时自动测代理能否访问 xAI（默认开）
+PROXY_TEST_ENABLED=1
+PROXY_TEST_URLS=https://accounts.x.ai/sign-up?redirect=grok-com,https://x.ai/
+PROXY_TEST_TIMEOUT=12
+PROXY_TEST_WORKERS=8
+PROXY_TEST_ACCEPT_STATUS=200-399
+# PROXY_TEST_REQUIRE_OK=1   # 全部不通则禁用代理池（默认 fail-open 仍用未测通的）
+
 # 内置 CF-Ares（预热 cookies 再注入 Turnstile）
 CF_ARES=auto
 CF_ARES_BROWSER_ENGINE=auto
@@ -139,6 +147,13 @@ TURNSTILE_API_URL=http://127.0.0.1:5080
 | `PROXY_RELAY_ENABLED` | `1` | 分享链接 / socks5 账密 → 本地 HTTP 中继 |
 | `PROXY_RELAY_AUTO_INSTALL` | `1` | 自动下载 sing-box |
 | `PROXY_RELAY_WORK_DIR` | `/tmp/solver-proxy-relay` | 中继工作目录 |
+| `PROXY_TEST_ENABLED` | `1` | 启动时测代理能否访问 xAI |
+| `PROXY_TEST_URLS` | accounts.x.ai + x.ai | 测活 URL，逗号分隔 |
+| `PROXY_TEST_TIMEOUT` | `12` | 单代理超时秒 |
+| `PROXY_TEST_WORKERS` | `8` | 并发测活数 |
+| `PROXY_TEST_ACCEPT_STATUS` | `200-399` | 通过的 HTTP 状态（403/503 也算通） |
+| `PROXY_TEST_REQUIRE_OK` | `0` | `1`=全部失败则空池 |
+| `PROXY_TEST_CACHE_SEC` | `300` | 测活结果缓存秒 |
 | `CF_ARES` | `auto` | `auto`/`1`/`0` 内置 CF-Ares 预热 |
 | `CF_ARES_BROWSER_ENGINE` | `auto` | `auto` / `undetected` / `seleniumbase` |
 | `CF_ARES_HEADLESS` | `1` | CF-Ares 无头 |
