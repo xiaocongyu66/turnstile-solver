@@ -318,7 +318,20 @@ func (g *Gateway) processRSS(pid int) uint64 {
 }
 
 func (g *Gateway) shouldRecycle(rssKB uint64, pressure int) bool {
-	if g.utilBin != "" {
+	return g.shouldRecycleEx(rssKB, pressure, 0)
+}
+
+// shouldRecycleEx: never kill a brand-new worker solely for host "pressure".
+// Large hosts often show pressure>90% while MemAvailable is still multi-GB
+// (page cache). Prefer worker RSS + available MB.
+func (g *Gateway) shouldRecycleEx(rssKB uint64, pressure int, solves int) bool {
+	soft := uint64(g.softMB) * 1024
+	hard := uint64(g.hardMB) * 1024
+	if hard > 0 && rssKB >= hard {
+		return true
+	}
+	// C++ util is advisory only for host pressure; ignore if it would thrash new workers
+	if g.utilBin != "" && solves > 0 {
 		out, err := exec.Command(
 			g.utilBin, "recycle",
 			strconv.FormatUint(rssKB/1024, 10),
@@ -329,23 +342,26 @@ func (g *Gateway) shouldRecycle(rssKB uint64, pressure int) bool {
 		if err == nil {
 			var m map[string]any
 			if json.Unmarshal(out, &m) == nil {
-				if v, ok := m["recycle"].(bool); ok {
-					return v
+				if v, ok := m["recycle"].(bool); ok && v {
+					// only honor util recycle if this worker is fat or host is critically low on free RAM
+					avail := memAvailableMB()
+					if rssKB >= soft || avail < 1200 {
+						return true
+					}
 				}
 			}
 		}
 	}
-	soft := uint64(g.softMB) * 1024
-	hard := uint64(g.hardMB) * 1024
-	if hard > 0 && rssKB >= hard {
+	if soft > 0 && rssKB >= soft {
 		return true
 	}
-	if soft > 0 && rssKB >= soft && pressure >= 70 {
+	// Host critically low free memory — recycle workers that already did work
+	avail := memAvailableMB()
+	if solves > 0 && avail > 0 && avail < 800 {
 		return true
 	}
-	if pressure >= 92 {
-		return true
-	}
+	// Do NOT recycle only because pressure>=92: on 128G machines with
+	// ~7G free, pressure still looks "high" and thrashing causes EPIPE.
 	return false
 }
 
@@ -621,12 +637,11 @@ func (g *Gateway) workerLoop(id int) {
 				rss := g.processRSS(wp.cmd.Process.Pid)
 				wp.lastRSS = rss
 				p := g.hostPressure()
-				// recycle earlier under high pressure even below soft limit
 				force := g.maxSolves > 0 && wp.solves >= g.maxSolves
 				force = force || (wp.fails >= 3 && wp.solves > 0)
-				if g.shouldRecycle(rss, p.Pressure) || force {
-					fmt.Fprintf(os.Stderr, "[gateway] recycle worker %d rss_kb=%d pressure=%d solves=%d fails=%d\n",
-						id, rss, p.Pressure, wp.solves, wp.fails)
+				if g.shouldRecycleEx(rss, p.Pressure, wp.solves) || force {
+					fmt.Fprintf(os.Stderr, "[gateway] recycle worker %d rss_kb=%d pressure=%d avail_mb=%d solves=%d fails=%d\n",
+						id, rss, p.Pressure, memAvailableMB(), wp.solves, wp.fails)
 					g.stopWorker(wp)
 					wp = nil
 					if err := g.ensureWorker(&wp, id); err != nil {
@@ -730,10 +745,12 @@ func (g *Gateway) start() error {
 			case <-t.C:
 				g.purgeExpired()
 				p := g.hostPressure()
-				if p.Pressure >= 92 {
+				availMB := float64(p.AvailableKB) / 1024.0
+				// only warn when free RAM is actually low (not just high % used on huge hosts)
+				if availMB > 0 && availMB < 1500 {
 					fmt.Fprintf(os.Stderr,
-						"[gateway] high pressure=%d avail_mb=%.0f queue=%d pending=%d — workers will recycle aggressively\n",
-						p.Pressure, float64(p.AvailableKB)/1024.0, len(g.queue), g.pending.Load())
+						"[gateway] low free RAM avail_mb=%.0f pressure=%d queue=%d pending=%d\n",
+						availMB, p.Pressure, len(g.queue), g.pending.Load())
 				}
 			}
 		}

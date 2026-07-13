@@ -187,9 +187,32 @@ class BrowserWorker:
             }
             if exe:
                 launch_kwargs["executable_path"] = exe
+            # System chromium-browser (Ubuntu/Gitee) often needs these flags on HF/Docker
+            if exe and ("chromium-browser" in exe or exe.endswith("/chromium")):
+                launch_kwargs["args"] = list(launch_kwargs.get("args") or []) + [
+                    "--single-process",  # reduce crash loops on constrained containers
+                ]
+                # remove single-process if it causes issues on large hosts — prefer stability first
+                launch_kwargs["args"] = [
+                    a for a in launch_kwargs["args"] if a != "--single-process"
+                ]
+                launch_kwargs["args"] += [
+                    "--disable-software-rasterizer",
+                    "--disable-extensions",
+                    "--disable-background-networking",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--disable-features=TranslateUI",
+                ]
             # If exe is None, Playwright uses its bundled chromium from
             # PLAYWRIGHT_BROWSERS_PATH / default cache.
-            self.browser = await self.playwright.chromium.launch(**launch_kwargs)
+            try:
+                self.browser = await self.playwright.chromium.launch(**launch_kwargs)
+            except Exception as exc:
+                log(f"id={self.worker_id} launch failed ({exc}); retry without executable_path")
+                launch_kwargs.pop("executable_path", None)
+                self.browser = await self.playwright.chromium.launch(**launch_kwargs)
+                exe = "playwright-default-retry"
             log(
                 f"id={self.worker_id} browser launched exe={exe or 'playwright-default'} "
                 f"rss={rss_mb():.1f}MB"
@@ -241,12 +264,15 @@ class BrowserWorker:
         if "://" not in page_url:
             page_url = DEFAULT_PAGE
 
+        # UA roughly match bundled chromium major when possible (108.x on Gitee debs)
+        ua = (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/108.0.5359.40 Safari/537.36"
+        )
         context_kwargs: dict[str, Any] = {
             "viewport": {"width": 1280, "height": 800},
-            "user_agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-            ),
+            "user_agent": ua,
+            "ignore_https_errors": True,
         }
         if proxy:
             # Playwright proxy: server= scheme://host:port, optional username/password
@@ -267,7 +293,16 @@ class BrowserWorker:
         trace: dict[str, Any] = {}
         t0 = time.time()
         try:
-            await page.goto(page_url, wait_until="domcontentloaded", timeout=min(45000, int(self.timeout * 1000)))
+            try:
+                await page.goto(
+                    page_url,
+                    wait_until="domcontentloaded",
+                    timeout=min(45000, int(self.timeout * 1000)),
+                )
+            except Exception as goto_exc:
+                log(f"id={self.worker_id} goto failed: {goto_exc}; try about:blank inject")
+                await page.goto("about:blank", wait_until="domcontentloaded", timeout=15000)
+                trace["goto_fallback"] = str(goto_exc)[:200]
             trace["goto_s"] = round(time.time() - t0, 3)
             t1 = time.time()
             await page.evaluate(

@@ -61,6 +61,8 @@ fi
 
 echo "  auto: workers=${SOLVER_GATEWAY_WORKERS} max=${SOLVER_GATEWAY_WORKERS_MAX} soft=${SOLVER_WATCHDOG_SOFT_MB} hard=${SOLVER_WATCHDOG_HARD_MB}"
 echo "🚀 Starting solver-gateway..."
+# Cap workers on HF when free RAM is moderate (avoid thrash + EPIPE)
+# Gateway still re-plans from live /proc/meminfo.
 exec /app/gateway/solver-gateway \
   --host "${SOLVER_GATEWAY_HOST}" \
   --port "${SOLVER_GATEWAY_PORT}" \
