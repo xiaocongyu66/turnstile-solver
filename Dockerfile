@@ -79,8 +79,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libx11-6 libx11-xcb1 libxcb1 libxext6 libxshmfence1 fonts-liberation \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir 'playwright>=1.55' \
-    && python -m playwright install chromium \
-    && python -m playwright install-deps chromium || true
+    && mkdir -p /ms-playwright \
+    && PLAYWRIGHT_BROWSERS_PATH=/ms-playwright python -m playwright install --with-deps chromium \
+    && ls -la /ms-playwright && find /ms-playwright -name chrome -o -name chromium -o -name headless_shell 2>/dev/null | head -20
 
 WORKDIR /app
 COPY --from=source /src/app/worker /app/worker
@@ -91,7 +92,9 @@ COPY --from=cppbuild /out/solver-util /app/util/solver-util
 
 RUN chmod +x /entrypoint.sh /app/gateway/solver-gateway \
       /app/watchdog/solver-watchdog /app/util/solver-util \
-    && mkdir -p /app/logs /data/logs
+      /app/worker/browser_worker.py \
+    && mkdir -p /app/logs /data/logs \
+    && python -c "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); print('chromium', p.chromium.executable_path); p.stop()"
 
 EXPOSE 7860
 ENTRYPOINT ["/usr/bin/tini", "--"]

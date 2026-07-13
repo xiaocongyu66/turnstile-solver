@@ -26,8 +26,24 @@ export SOLVER_WATCHDOG_HARD_MB="${SOLVER_WATCHDOG_HARD_MB:-auto}"
 export SOLVER_WATCHDOG_INTERVAL_SEC="${SOLVER_WATCHDOG_INTERVAL_SEC:-auto}"
 export SOLVER_WATCHDOG_ATTACH="${SOLVER_WATCHDOG_ATTACH:-1}"
 export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/ms-playwright}"
+# Ensure workers see the same browser cache as image build
+export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD="${PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD:-1}"
 
 mkdir -p /app/logs /data/logs 2>/dev/null || mkdir -p /app/logs
+
+# Log chromium path for HF debugging
+python - <<'PY' 2>/dev/null || true
+import os, glob
+print("[*] PLAYWRIGHT_BROWSERS_PATH=", os.environ.get("PLAYWRIGHT_BROWSERS_PATH"))
+try:
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        print("[*] playwright chromium:", p.chromium.executable_path)
+except Exception as e:
+    print("[!] playwright chromium resolve failed:", e)
+for pat in ("/ms-playwright/**/chrome", "/ms-playwright/**/headless_shell"):
+    print("[*]", pat, glob.glob(pat, recursive=True)[:5])
+PY
 
 if [ -n "${SPACE_ID:-}" ]; then
   _slug=$(echo "${SPACE_ID}" | tr '/' '-')

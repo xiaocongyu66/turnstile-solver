@@ -52,7 +52,8 @@ def malloc_trim() -> None:
         pass
 
 
-def find_chrome() -> str:
+def find_chrome() -> str | None:
+    """Return chromium executable path, or None to let Playwright use its default."""
     env = (
         os.environ.get("SOLVER_CHROME_PATH")
         or os.environ.get("CHROME_PATH")
@@ -61,21 +62,43 @@ def find_chrome() -> str:
     ).strip()
     if env and os.path.isfile(env):
         return env
+    # Prefer Playwright's own resolved path (handles versioned dirs)
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            path = p.chromium.executable_path
+            if path and os.path.isfile(path):
+                return path
+    except Exception:
+        pass
     paths = glob.glob(os.path.expanduser("~/.cloakbrowser/chromium-*/chrome"))
     if paths:
         return sorted(paths)[-1]
-    # playwright default cache
-    for pattern in (
+    # Common Playwright install layouts (linux)
+    patterns = (
         os.path.expanduser("~/.cache/ms-playwright/chromium-*/chrome-linux/chrome"),
+        os.path.expanduser("~/.cache/ms-playwright/chromium_headless_shell-*/chrome-linux/headless_shell"),
         "/ms-playwright/chromium-*/chrome-linux/chrome",
-    ):
-        paths = glob.glob(pattern)
-        if paths:
-            return sorted(paths)[-1]
-    raise RuntimeError(
-        "Chromium not found. Install: playwright install chromium "
-        "or set SOLVER_CHROME_PATH / install cloakbrowser"
+        "/ms-playwright/chromium-*/chrome-linux/chromium",
+        "/ms-playwright/chromium_headless_shell-*/chrome-linux/headless_shell",
+        "/root/.cache/ms-playwright/chromium-*/chrome-linux/chrome",
+        "/home/*/.cache/ms-playwright/chromium-*/chrome-linux/chrome",
     )
+    found: list[str] = []
+    for pattern in patterns:
+        found.extend(glob.glob(pattern))
+    # recursive fallback under PLAYWRIGHT_BROWSERS_PATH
+    base = (os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or "/ms-playwright").strip()
+    if os.path.isdir(base):
+        found.extend(glob.glob(f"{base}/**/chrome", recursive=True))
+        found.extend(glob.glob(f"{base}/**/chromium", recursive=True))
+        found.extend(glob.glob(f"{base}/**/headless_shell", recursive=True))
+    # filter executables
+    found = [p for p in found if os.path.isfile(p) and os.access(p, os.X_OK)]
+    if found:
+        return sorted(found)[-1]
+    return None
 
 
 def read_cmd() -> Optional[dict[str, Any]]:
@@ -135,16 +158,24 @@ class BrowserWorker:
 
             self.playwright = await async_playwright().start()
             exe = find_chrome()
-            self.browser = await self.playwright.chromium.launch(
-                executable_path=exe,
-                headless=self.headless,
-                args=[
+            launch_kwargs: dict[str, Any] = {
+                "headless": self.headless,
+                "args": [
                     "--disable-dev-shm-usage",
                     "--no-sandbox",
                     "--disable-gpu",
+                    "--disable-setuid-sandbox",
                 ],
+            }
+            if exe:
+                launch_kwargs["executable_path"] = exe
+            # If exe is None, Playwright uses its bundled chromium from
+            # PLAYWRIGHT_BROWSERS_PATH / default cache.
+            self.browser = await self.playwright.chromium.launch(**launch_kwargs)
+            log(
+                f"id={self.worker_id} browser launched exe={exe or 'playwright-default'} "
+                f"rss={rss_mb():.1f}MB"
             )
-            log(f"id={self.worker_id} browser launched exe={exe} rss={rss_mb():.1f}MB")
 
     async def _close_browser_unlocked(self) -> None:
         b, self.browser = self.browser, None
