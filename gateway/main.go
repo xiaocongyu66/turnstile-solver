@@ -38,7 +38,7 @@ import (
 	"time"
 )
 
-const version = "0.4.6"
+const version = "0.4.7"
 
 type Job struct {
 	ID        string `json:"id"`
@@ -408,17 +408,27 @@ func (g *Gateway) startWorker(id int) (*workerProc, error) {
 		// multi-core: let asyncio + chromium use available cores
 		"OMP_NUM_THREADS="+strconv.Itoa(max(1, runtime.NumCPU()/max(1, g.workers))),
 	)
-	// strip outer proxies unless worker uses its own file
-	filtered := make([]string, 0, len(cmd.Env))
-	for _, e := range cmd.Env {
-		up := strings.ToUpper(e)
-		if strings.HasPrefix(up, "HTTP_PROXY=") || strings.HasPrefix(up, "HTTPS_PROXY=") ||
-			strings.HasPrefix(up, "ALL_PROXY=") {
-			continue
+	// Strip outer proxies by default (avoid accidental host proxy).
+	// Keep them when global sing-box proxy service is applied:
+	//   SOLVER_USE_GLOBAL_PROXY=1 or PROXY_SERVICE_APPLY_GLOBAL=1
+	keepProxyEnv := envBool("SOLVER_USE_GLOBAL_PROXY", false) ||
+		envBool("PROXY_SERVICE_APPLY_GLOBAL", false)
+	if !keepProxyEnv {
+		filtered := make([]string, 0, len(cmd.Env))
+		for _, e := range cmd.Env {
+			key := e
+			if i := strings.IndexByte(e, '='); i >= 0 {
+				key = e[:i]
+			}
+			switch strings.ToLower(key) {
+			case "http_proxy", "https_proxy", "all_proxy", "no_proxy":
+				// drop host-level proxy; workers use PROXY_POOL / local relay
+				continue
+			}
+			filtered = append(filtered, e)
 		}
-		filtered = append(filtered, e)
+		cmd.Env = filtered
 	}
-	cmd.Env = filtered
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err

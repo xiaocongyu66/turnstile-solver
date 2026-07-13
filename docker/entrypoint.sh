@@ -73,8 +73,21 @@ export CF_ARES_TIMEOUT="${CF_ARES_TIMEOUT:-30}"
 export CF_ARES_IMPERSONATE="${CF_ARES_IMPERSONATE:-chrome120}"
 export CF_ARES_SESSION_DIR="${CF_ARES_SESSION_DIR:-/tmp/solver-cf-ares-sessions}"
 # Do NOT set CF_ARES_CHROME_PATH to Playwright chromium (ChromeDriver mismatch).
-# Leave empty so undetected picks a matching browser, or set to real Chrome.
 export CF_ARES_CHROME_PATH="${CF_ARES_CHROME_PATH:-}"
+
+# ── Standalone sing-box proxy service (global HTTP/SOCKS) ──────────
+# https://github.com/SagerNet/sing-box
+export PROXY_SERVICE_ENABLED="${PROXY_SERVICE_ENABLED:-auto}"
+export PROXY_SERVICE_HOST="${PROXY_SERVICE_HOST:-127.0.0.1}"
+export PROXY_SERVICE_PORT="${PROXY_SERVICE_PORT:-7890}"
+export PROXY_SERVICE_DNS="${PROXY_SERVICE_DNS:-1.1.1.1,8.8.8.8,8.8.4.4}"
+export PROXY_SERVICE_DNS_STRATEGY="${PROXY_SERVICE_DNS_STRATEGY:-prefer_ipv4}"
+export PROXY_SERVICE_MODE="${PROXY_SERVICE_MODE:-urltest}"
+export PROXY_SERVICE_URLTEST_URL="${PROXY_SERVICE_URLTEST_URL:-https://www.gstatic.com/generate_204}"
+export PROXY_SERVICE_URLTEST_INTERVAL="${PROXY_SERVICE_URLTEST_INTERVAL:-3m}"
+export PROXY_SERVICE_WORK_DIR="${PROXY_SERVICE_WORK_DIR:-/tmp/solver-proxy-service}"
+export PROXY_SERVICE_LOG_LEVEL="${PROXY_SERVICE_LOG_LEVEL:-warn}"
+export PROXY_SERVICE_APPLY_GLOBAL="${PROXY_SERVICE_APPLY_GLOBAL:-1}"
 export PROXY_RELAY_ENABLED="${PROXY_RELAY_ENABLED:-1}"
 export PROXY_RELAY_AUTO_INSTALL="${PROXY_RELAY_AUTO_INSTALL:-1}"
 export PROXY_RELAY_WORK_DIR="${PROXY_RELAY_WORK_DIR:-/tmp/solver-proxy-relay}"
@@ -86,7 +99,7 @@ export PROXY_TEST_WORKERS="${PROXY_TEST_WORKERS:-8}"
 export PROXY_TEST_ACCEPT_STATUS="${PROXY_TEST_ACCEPT_STATUS:-200-399}"
 export PROXY_TEST_STATE_FILE="${PROXY_TEST_STATE_FILE:-/tmp/solver-proxy-test.json}"
 export PROXY_TEST_CACHE_SEC="${PROXY_TEST_CACHE_SEC:-300}"
-mkdir -p "${PROXY_RELAY_WORK_DIR}" "${CF_ARES_SESSION_DIR}" 2>/dev/null || true
+mkdir -p "${PROXY_RELAY_WORK_DIR}" "${CF_ARES_SESSION_DIR}" "${PROXY_SERVICE_WORK_DIR}" 2>/dev/null || true
 
 _proxy_hint="(empty — set PROXY_POOL for residential/ISP)"
 if [ -n "${PROXY_POOL:-}${PROXY_POOL_LIST:-}${PROXIES:-}${PROXY_LIST:-}${SOLVER_PROXY:-}${CF_ARES_PROXY:-}" ]; then
@@ -94,6 +107,66 @@ if [ -n "${PROXY_POOL:-}${PROXY_POOL_LIST:-}${PROXIES:-}${PROXY_LIST:-}${SOLVER_
 fi
 echo "🌐 proxy: ${_proxy_hint}  strategy=${PROXY_POOL_STRATEGY}  relay=${PROXY_RELAY_ENABLED}  test=${PROXY_TEST_ENABLED}"
 echo "🛡️  CF_ARES=${CF_ARES} engine=${CF_ARES_BROWSER_ENGINE} path=${CF_ARES_PATH}"
+
+# Start global sing-box proxy service when PROXY_POOL has share-links / any nodes
+_start_proxy_svc=0
+case "${PROXY_SERVICE_ENABLED}" in
+  1|true|yes|on) _start_proxy_svc=1 ;;
+  0|false|no|off) _start_proxy_svc=0 ;;
+  *)
+    # auto: start if PROXY_POOL set
+    if [ -n "${PROXY_POOL:-}${PROXY_POOL_LIST:-}${PROXIES:-}${PROXY_LIST:-}${PROXY_POOL_FILE:-}" ]; then
+      _start_proxy_svc=1
+    fi
+    ;;
+esac
+
+if [ "${_start_proxy_svc}" = "1" ]; then
+  echo "🛰️  Starting sing-box proxy service (DNS=${PROXY_SERVICE_DNS} mode=${PROXY_SERVICE_MODE} port=${PROXY_SERVICE_PORT})..."
+  # run in background; logs to work dir
+  (
+    cd /app
+    PYTHONPATH=/app/worker:/app/vendor/CF-Ares \
+      python /app/worker/proxy_service.py run \
+      >"${PROXY_SERVICE_WORK_DIR}/service.stdout.log" 2>&1
+  ) &
+  echo $! >"${PROXY_SERVICE_WORK_DIR}/service.pid"
+  # wait for ready (proxy_service prints PROXY_SERVICE_URL=)
+  _wait=0
+  while [ "${_wait}" -lt 45 ]; do
+    if [ -f "${PROXY_SERVICE_WORK_DIR}/proxy.env" ]; then
+      # shellcheck disable=SC1090
+      . "${PROXY_SERVICE_WORK_DIR}/proxy.env"
+      echo "   proxy-service ready HTTP_PROXY=${HTTP_PROXY:-?} pid=$(cat "${PROXY_SERVICE_WORK_DIR}/service.pid" 2>/dev/null || echo '?')"
+      break
+    fi
+    # died?
+    if [ -f "${PROXY_SERVICE_WORK_DIR}/service.pid" ]; then
+      _spid=$(cat "${PROXY_SERVICE_WORK_DIR}/service.pid")
+      if ! kill -0 "${_spid}" 2>/dev/null; then
+        echo "   ⚠️  proxy-service exited early; tail:"
+        tail -30 "${PROXY_SERVICE_WORK_DIR}/service.stdout.log" 2>/dev/null || true
+        tail -30 "${PROXY_SERVICE_WORK_DIR}/sing-box.log" 2>/dev/null || true
+        break
+      fi
+    fi
+    _wait=$((_wait + 1))
+    sleep 1
+  done
+  if [ -n "${HTTP_PROXY:-}" ] && [ "${PROXY_SERVICE_APPLY_GLOBAL}" != "0" ]; then
+    export HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy NO_PROXY no_proxy
+    export SOLVER_USE_GLOBAL_PROXY=1
+    export PROXY_SERVICE_APPLY_GLOBAL=1
+    # Prefer global mixed port for per-request solvers too
+    export SOLVER_PROXY="${SOLVER_PROXY:-$HTTP_PROXY}"
+    echo "   🌍 global proxy applied → ${HTTP_PROXY}"
+  else
+    echo "   ⚠️  proxy-service not ready — workers will use per-node relay fallback"
+  fi
+else
+  echo "🛰️  proxy-service skipped (PROXY_SERVICE_ENABLED=${PROXY_SERVICE_ENABLED})"
+fi
+
 # Thin adapter diagnose — uses vendor/CF-Ares as library (not rewritten)
 python - <<'PY' 2>/dev/null || echo "   ⚠️  CF-Ares diagnose failed"
 import sys
@@ -109,8 +182,19 @@ except Exception as e:
     print(f"   ⚠️  CF-Ares import error: {e}")
 PY
 
-# Auto-test proxies can reach accounts.x.ai / x.ai (shared state for workers)
-if [ "${PROXY_TEST_ENABLED}" != "0" ] && [ -n "${PROXY_POOL:-}${PROXY_POOL_LIST:-}${PROXIES:-}${PROXY_LIST:-}${SOLVER_PROXY:-}${CF_ARES_PROXY:-}${PROXY_POOL_FILE:-}" ]; then
+# When global proxy is up, skip per-node boot test (service already urltests)
+if [ -n "${HTTP_PROXY:-}" ] && [ "${PROXY_SERVICE_APPLY_GLOBAL:-0}" = "1" ]; then
+  echo "🔎 proxy test: using global sing-box service (${HTTP_PROXY}); skip per-node boot test"
+  # optional quick curl through global proxy
+  if command -v curl >/dev/null 2>&1; then
+    if curl -sS -m 15 -o /dev/null -w "   global_proxy_probe=%{http_code} time=%{time_total}\n" \
+      -x "${HTTP_PROXY}" "https://accounts.x.ai/sign-up?redirect=grok-com" 2>/dev/null; then
+      :
+    else
+      echo "   ⚠️  global proxy probe failed (service may still work for browser)"
+    fi
+  fi
+elif [ "${PROXY_TEST_ENABLED}" != "0" ] && [ -n "${PROXY_POOL:-}${PROXY_POOL_LIST:-}${PROXIES:-}${PROXY_LIST:-}${SOLVER_PROXY:-}${CF_ARES_PROXY:-}${PROXY_POOL_FILE:-}" ]; then
   echo "🔎 Testing proxies → xAI (timeout=${PROXY_TEST_TIMEOUT}s workers=${PROXY_TEST_WORKERS})..."
   python -c "
 import json, sys

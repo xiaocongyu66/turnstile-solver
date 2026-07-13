@@ -36,6 +36,7 @@ RUN set -eu; \
     test -f /src/app/worker/proxy_pool.py; \
     test -f /src/app/worker/proxy_relay.py; \
     test -f /src/app/worker/cf_ares_helper.py; \
+    test -f /src/app/worker/proxy_service.py; \
     test -d /src/app/vendor/CF-Ares/cf_ares; \
     test -f /src/app/util/solver_util.cpp; \
     test -f /src/app/docker/entrypoint.sh; \
@@ -172,7 +173,12 @@ ENV PYTHONPATH=/app/worker:/app/vendor/CF-Ares \
     CF_ARES_HEADLESS=1 \
     CF_ARES_TIMEOUT=30 \
     CF_ARES_IMPERSONATE=chrome120 \
-    CF_ARES_SESSION_DIR=/tmp/solver-cf-ares-sessions
+    CF_ARES_SESSION_DIR=/tmp/solver-cf-ares-sessions \
+    PROXY_SERVICE_ENABLED=auto \
+    PROXY_SERVICE_PORT=7890 \
+    PROXY_SERVICE_DNS=1.1.1.1,8.8.8.8,8.8.4.4 \
+    PROXY_SERVICE_MODE=urltest \
+    PROXY_SERVICE_APPLY_GLOBAL=1
 
 RUN chmod +x /entrypoint.sh /app/gateway/solver-gateway \
       /app/watchdog/solver-watchdog /app/util/solver-util \

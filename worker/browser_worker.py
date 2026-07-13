@@ -303,15 +303,38 @@ class BrowserWorker:
         if "://" not in page_url:
             page_url = DEFAULT_PAGE
 
-        # Resolve proxy from request + PROXY_POOL env (with relay conversion)
+        # Resolve proxy: request > global sing-box service > PROXY_POOL relay
         effective_proxy = ""
-        try:
-            import proxy_pool as _pp
+        global_px = (
+            os.environ.get("SOLVER_PROXY")
+            or os.environ.get("HTTP_PROXY")
+            or os.environ.get("HTTPS_PROXY")
+            or ""
+        ).strip()
+        use_global = (os.environ.get("SOLVER_USE_GLOBAL_PROXY") or os.environ.get("PROXY_SERVICE_APPLY_GLOBAL") or "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        if (proxy or "").strip():
+            try:
+                import proxy_pool as _pp
 
-            effective_proxy = (_pp.pick_proxy(explicit=proxy) or "").strip()
-        except Exception as exc:
-            log(f"id={self.worker_id} proxy_pool: {exc}")
-            effective_proxy = (proxy or "").strip()
+                effective_proxy = (_pp.pick_proxy(explicit=proxy) or proxy or "").strip()
+            except Exception:
+                effective_proxy = (proxy or "").strip()
+        elif use_global and global_px:
+            effective_proxy = global_px
+            log(f"id={self.worker_id} using global proxy service {effective_proxy[:48]}")
+        else:
+            try:
+                import proxy_pool as _pp
+
+                effective_proxy = (_pp.pick_proxy(explicit="") or "").strip()
+            except Exception as exc:
+                log(f"id={self.worker_id} proxy_pool: {exc}")
+                effective_proxy = ""
 
         # CF-Ares like register: AresClient.get (+ optional challenge) → cookies → Playwright
         ares_warm: dict[str, Any] = {}

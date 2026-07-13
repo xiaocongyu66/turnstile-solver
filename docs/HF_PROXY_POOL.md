@@ -1,53 +1,57 @@
-# HF Space：代理协议转换（含 Hysteria2）
+# HF Space：独立 sing-box 代理服务（全局 + 协议转换）
 
-HF solver **已内置** sing-box 中继，可把分享链接转成本地 `http://127.0.0.1:PORT`，再给 Chromium / CF-Ares / Playwright 使用。
+基于 [SagerNet/sing-box](https://github.com/SagerNet/sing-box) 单独拉起 **proxy-service**：
 
-## 支持的格式（`PROXY_POOL`）
+- 多协议：`hysteria2` / `hy2` / `vmess` / `vless` / `trojan` / `ss` / `socks5` / `http`
+- Base64 订阅或明文多行 `PROXY_POOL`
+- **自定义 DNS**（`PROXY_SERVICE_DNS`）
+- 本地 **mixed** 入口（HTTP + SOCKS 同一端口）
+- **urltest** 自动选最快节点
+- 应用到容器全局：`HTTP_PROXY` / `HTTPS_PROXY`（solver worker 跟随）
 
-| 格式 | 示例 |
-|------|------|
-| HTTP | `http://user:pass@host:port` |
-| SOCKS5 | `socks5h://user:pass@host:port` |
-| 简写 | `host:port` → `http://host:port` |
-| Hysteria2 | `hysteria2://uuid@host:port?sni=localhost&insecure=1#HK-1` |
-| Hysteria2 短写 | `hy2://...` |
-| VMess / VLESS / Trojan / SS | `vmess://` `vless://` `trojan://` `ss://` |
-| Base64 订阅 | 整段 base64（解码后多行分享链接） |
-
-多条用 **换行** 或 **逗号** 分隔。
-
-## 环境变量（HF Secrets）
+## HF Secrets 推荐
 
 ```text
-PROXY_POOL=<见下方节点列表或 base64>
-PROXY_RELAY_ENABLED=1
+# 节点（明文多行 或 整段 base64）
+PROXY_POOL=<hysteria2://... 或 base64 订阅>
+
+# 独立代理服务
+PROXY_SERVICE_ENABLED=auto
+PROXY_SERVICE_PORT=7890
+PROXY_SERVICE_HOST=127.0.0.1
+PROXY_SERVICE_DNS=1.1.1.1,8.8.8.8,8.8.4.4
+PROXY_SERVICE_DNS_STRATEGY=prefer_ipv4
+PROXY_SERVICE_MODE=urltest
+PROXY_SERVICE_URLTEST_URL=https://www.gstatic.com/generate_204
+PROXY_SERVICE_URLTEST_INTERVAL=3m
+PROXY_SERVICE_APPLY_GLOBAL=1
 PROXY_RELAY_AUTO_INSTALL=1
-PROXY_POOL_STRATEGY=round_robin
-PROXY_TEST_ENABLED=1
-PROXY_TEST_URLS=https://challenges.cloudflare.com/turnstile/v0/api.js,https://accounts.x.ai/sign-up?redirect=grok-com
-# 可选：测活全挂则不用代理
-# PROXY_TEST_REQUIRE_OK=1
 ```
 
-启动日志应出现：
+## 启动日志应看到
 
 ```text
-[proxy-pool] relay ready (sing-box ...)
-[proxy-pool] relayed → http://127.0.0.1:19080 (hysteria2://...)
-[proxy-pool] testing N proxy(ies) → xAI
+🛰️  Starting sing-box proxy service (DNS=1.1.1.1,8.8.8.8 mode=urltest port=7890)...
+[proxy-service] outbound n1_HK-1 type=hysteria2 ...
+[proxy-service] ready HTTP/SOCKS mixed on 127.0.0.1:7890
+   🌍 global proxy applied → http://127.0.0.1:7890
 ```
 
-## 操作步骤
+## 手动本地调试
 
-1. Space → **Settings → Variables and secrets**
-2. 新建 Secret：`PROXY_POOL`
-3. 粘贴 **明文 hysteria2 多行**（推荐，见 `hf-proxy-pool-hysteria2.txt`）  
-   或粘贴 **整段 base64 订阅**
-4. 确认 `PROXY_RELAY_ENABLED=1`
-5. **Restart** Space（不必每次 rebuild，改 Secret 后重启即可）
+```bash
+export PROXY_POOL="$(cat docs/hf-proxy-pool-hysteria2.txt)"
+export PROXY_SERVICE_DNS=1.1.1.1,8.8.8.8
+export PROXY_SERVICE_PORT=7890
+python worker/proxy_service.py print-config   # 看生成的 sing-box.json
+python worker/proxy_service.py run           # 前台运行
+# 另开终端
+curl -x http://127.0.0.1:7890 -I https://accounts.x.ai/
+```
 
 ## 说明
 
-- 浏览器不能直接用 `hysteria2://`，必须经 **sing-box mixed → 本地 HTTP**。
-- 首次启动会自动下载 `sing-box`（需容器能访问 GitHub releases）。
-- 节点过多会占本地端口；默认 `PROXY_RELAY_MAX_NODES=48`。
+- 浏览器不能直接吃 `hysteria2://`，必须经 sing-box 转本地 HTTP。
+- 首次启动自动下载 sing-box（需访问 GitHub Releases）。
+- `PROXY_SERVICE_APPLY_GLOBAL=1` 时 gateway **保留** `HTTP_PROXY` 传给 browser-worker。
+- 仍保留旧的 per-node relay（`proxy_pool`）作回退。
