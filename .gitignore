@@ -1,0 +1,10 @@
+**/__pycache__/
+*.pyc
+logs/
+gateway/solver-gateway
+watchdog/solver-watchdog
+watchdog/target/
+util/solver-util
+*.log
+.env
+.DS_Store
