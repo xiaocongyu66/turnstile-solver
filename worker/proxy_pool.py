@@ -286,10 +286,10 @@ def _test_urls() -> list[str]:
         if urls:
             return urls
     # Must reach CF challenge CDN, not only x.ai (403 on x.ai is not enough for Turnstile)
+    # Prefer CF CDN first (Turnstile needs it); then xAI
     return [
         "https://challenges.cloudflare.com/turnstile/v0/api.js",
         "https://accounts.x.ai/sign-up?redirect=grok-com",
-        "https://x.ai/",
     ]
 
 

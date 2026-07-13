@@ -313,18 +313,18 @@ class BrowserWorker:
             log(f"id={self.worker_id} proxy_pool: {exc}")
             effective_proxy = (proxy or "").strip()
 
-        # CF-Ares (vendor lib as-is): solve_challenge → cookies → Playwright inject
+        # CF-Ares like register: AresClient.get (+ optional challenge) → cookies → Playwright
         ares_warm: dict[str, Any] = {}
         try:
             import cf_ares_helper as _cah
 
             if _cah.enabled() and _cah.available():
                 log(
-                    f"id={self.worker_id} CF-Ares solve_challenge "
+                    f"id={self.worker_id} CF-Ares warm (register-style get) "
                     f"url={page_url[:60]} proxy={(effective_proxy or 'direct')[:40]}"
                 )
                 ares_warm = await asyncio.to_thread(
-                    _cah.solve_challenge,
+                    _cah.warm_session,
                     page_url,
                     effective_proxy or None,
                 )
@@ -332,7 +332,7 @@ class BrowserWorker:
                     f"id={self.worker_id} CF-Ares done ok={ares_warm.get('ok')} "
                     f"cookies={len(ares_warm.get('cookies') or [])} "
                     f"cf_clearance={ares_warm.get('has_cf_clearance')} "
-                    f"status={ares_warm.get('status')} via={ares_warm.get('challenge')}"
+                    f"status={ares_warm.get('status')} via={ares_warm.get('via')}"
                 )
             elif _cah.enabled():
                 diag = _cah.diagnose()
@@ -415,8 +415,8 @@ class BrowserWorker:
         }
         if isinstance(ares_warm, dict) and ares_warm.get("error"):
             trace["ares_err"] = str(ares_warm.get("error"))[:160]
-        if isinstance(ares_warm, dict) and ares_warm.get("challenge"):
-            trace["ares_via"] = str(ares_warm.get("challenge"))
+        if isinstance(ares_warm, dict) and ares_warm.get("via"):
+            trace["ares_via"] = str(ares_warm.get("via"))
         t0 = time.time()
         try:
             try:

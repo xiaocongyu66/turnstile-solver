@@ -65,17 +65,22 @@ fi
 # Built-in proxy pool + CF-Ares (env-driven)
 export PYTHONPATH="${PYTHONPATH:-/app/worker:/app/vendor/CF-Ares}"
 export CF_ARES_PATH="${CF_ARES_PATH:-/app/vendor/CF-Ares}"
+# Align with grok_register: engine=auto, timeout=30, chrome only if CF_ARES_CHROME_PATH set
 export CF_ARES="${CF_ARES:-1}"
-export CF_ARES_BROWSER_ENGINE="${CF_ARES_BROWSER_ENGINE:-undetected}"
+export CF_ARES_BROWSER_ENGINE="${CF_ARES_BROWSER_ENGINE:-auto}"
 export CF_ARES_HEADLESS="${CF_ARES_HEADLESS:-1}"
-export CF_ARES_TIMEOUT="${CF_ARES_TIMEOUT:-60}"
+export CF_ARES_TIMEOUT="${CF_ARES_TIMEOUT:-30}"
+export CF_ARES_IMPERSONATE="${CF_ARES_IMPERSONATE:-chrome120}"
 export CF_ARES_SESSION_DIR="${CF_ARES_SESSION_DIR:-/tmp/solver-cf-ares-sessions}"
+# Do NOT set CF_ARES_CHROME_PATH to Playwright chromium (ChromeDriver mismatch).
+# Leave empty so undetected picks a matching browser, or set to real Chrome.
+export CF_ARES_CHROME_PATH="${CF_ARES_CHROME_PATH:-}"
 export PROXY_RELAY_ENABLED="${PROXY_RELAY_ENABLED:-1}"
 export PROXY_RELAY_AUTO_INSTALL="${PROXY_RELAY_AUTO_INSTALL:-1}"
 export PROXY_RELAY_WORK_DIR="${PROXY_RELAY_WORK_DIR:-/tmp/solver-proxy-relay}"
 export PROXY_POOL_STRATEGY="${PROXY_POOL_STRATEGY:-round_robin}"
 export PROXY_TEST_ENABLED="${PROXY_TEST_ENABLED:-1}"
-export PROXY_TEST_URLS="${PROXY_TEST_URLS:-https://challenges.cloudflare.com/turnstile/v0/api.js,https://accounts.x.ai/sign-up?redirect=grok-com,https://x.ai/}"
+export PROXY_TEST_URLS="${PROXY_TEST_URLS:-https://challenges.cloudflare.com/turnstile/v0/api.js,https://accounts.x.ai/sign-up?redirect=grok-com}"
 export PROXY_TEST_TIMEOUT="${PROXY_TEST_TIMEOUT:-12}"
 export PROXY_TEST_WORKERS="${PROXY_TEST_WORKERS:-8}"
 export PROXY_TEST_ACCEPT_STATUS="${PROXY_TEST_ACCEPT_STATUS:-200-399}"

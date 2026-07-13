@@ -168,9 +168,10 @@ ENV PYTHONPATH=/app/worker:/app/vendor/CF-Ares \
     PROXY_RELAY_ENABLED=1 \
     PROXY_RELAY_AUTO_INSTALL=1 \
     CF_ARES=1 \
-    CF_ARES_BROWSER_ENGINE=undetected \
+    CF_ARES_BROWSER_ENGINE=auto \
     CF_ARES_HEADLESS=1 \
-    CF_ARES_TIMEOUT=60 \
+    CF_ARES_TIMEOUT=30 \
+    CF_ARES_IMPERSONATE=chrome120 \
     CF_ARES_SESSION_DIR=/tmp/solver-cf-ares-sessions
 
 RUN chmod +x /entrypoint.sh /app/gateway/solver-gateway \
