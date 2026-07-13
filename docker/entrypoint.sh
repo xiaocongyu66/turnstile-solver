@@ -62,6 +62,23 @@ else
   echo "⚠️  No SOLVER_API_TOKEN — public solve endpoints are open (set secret on HF)"
 fi
 
+# Built-in proxy pool + CF-Ares (env-driven)
+export PYTHONPATH="${PYTHONPATH:-/app/worker:/app/vendor/CF-Ares}"
+export CF_ARES_PATH="${CF_ARES_PATH:-/app/vendor/CF-Ares}"
+export CF_ARES="${CF_ARES:-auto}"
+export PROXY_RELAY_ENABLED="${PROXY_RELAY_ENABLED:-1}"
+export PROXY_RELAY_AUTO_INSTALL="${PROXY_RELAY_AUTO_INSTALL:-1}"
+export PROXY_RELAY_WORK_DIR="${PROXY_RELAY_WORK_DIR:-/tmp/solver-proxy-relay}"
+export PROXY_POOL_STRATEGY="${PROXY_POOL_STRATEGY:-round_robin}"
+mkdir -p "${PROXY_RELAY_WORK_DIR}" 2>/dev/null || true
+
+_proxy_hint="(empty — set PROXY_POOL for residential/ISP)"
+if [ -n "${PROXY_POOL:-}${PROXY_POOL_LIST:-}${PROXIES:-}${PROXY_LIST:-}${SOLVER_PROXY:-}${CF_ARES_PROXY:-}" ]; then
+  _proxy_hint="configured (PROXY_POOL / SOLVER_PROXY)"
+fi
+echo "🌐 proxy: ${_proxy_hint}  strategy=${PROXY_POOL_STRATEGY}  relay=${PROXY_RELAY_ENABLED}"
+echo "🛡️  CF_ARES=${CF_ARES}  path=${CF_ARES_PATH}"
+
 echo "  auto: workers=${SOLVER_GATEWAY_WORKERS} max=${SOLVER_GATEWAY_WORKERS_MAX} soft=${SOLVER_WATCHDOG_SOFT_MB} hard=${SOLVER_WATCHDOG_HARD_MB}"
 echo "🚀 Starting solver-gateway..."
 # Cap workers on HF when free RAM is moderate (avoid thrash + EPIPE)

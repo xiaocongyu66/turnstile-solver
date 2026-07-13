@@ -10,7 +10,7 @@
 #
 # Hardware: ≥ 2 vCPU / 16 GB RAM recommended
 
-ARG PYTHON_VERSION=3.11-bookworm
+ARG PYTHON_VERSION=3.12-bookworm
 ARG REPO_URL=https://github.com/xiaocongyu66/turnstile-solver.git
 ARG REPO_REF=main
 ARG CHROMIUM_TAG=
@@ -33,6 +33,10 @@ RUN set -eu; \
     test -f /src/app/watchdog/src/main.rs; \
     test -f /src/app/gateway/main.go; \
     test -f /src/app/worker/browser_worker.py; \
+    test -f /src/app/worker/proxy_pool.py; \
+    test -f /src/app/worker/proxy_relay.py; \
+    test -f /src/app/worker/cf_ares_helper.py; \
+    test -d /src/app/vendor/CF-Ares/cf_ares; \
     test -f /src/app/util/solver_util.cpp; \
     test -f /src/app/docker/entrypoint.sh; \
     test -d /src/app/vendor/chromium; \
@@ -82,8 +86,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
     libgbm1 libasound2 libpango-1.0-0 libcairo2 libatspi2.0-0 \
     libx11-6 libx11-xcb1 libxcb1 libxext6 libxshmfence1 fonts-liberation \
+    unzip \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir 'playwright>=1.55'
+    && pip install --no-cache-dir \
+        'playwright>=1.55' \
+        'curl_cffi>=0.5.7' \
+        'requests>=2.28.0' \
+        'seleniumbase>=4.0.0' \
+        'undetected-chromedriver>=3.5.0'
 
 # Offline install: bundled debs from vendor/chromium (Gitee jizijhj/chromium_1)
 COPY --from=source /src/app/vendor/chromium /opt/vendor/chromium
@@ -140,15 +150,24 @@ RUN set -eux; \
 
 WORKDIR /app
 COPY --from=source /src/app/worker /app/worker
+COPY --from=source /src/app/vendor/CF-Ares /app/vendor/CF-Ares
 COPY --from=source /src/app/docker/entrypoint.sh /entrypoint.sh
 COPY --from=gobuild /out/solver-gateway /app/gateway/solver-gateway
 COPY --from=rustbuild /out/solver-watchdog /app/watchdog/solver-watchdog
 COPY --from=cppbuild /out/solver-util /app/util/solver-util
 
+ENV PYTHONPATH=/app/worker:/app/vendor/CF-Ares \
+    CF_ARES_PATH=/app/vendor/CF-Ares \
+    PROXY_RELAY_WORK_DIR=/tmp/solver-proxy-relay \
+    PROXY_RELAY_ENABLED=1 \
+    PROXY_RELAY_AUTO_INSTALL=1 \
+    CF_ARES=auto
+
 RUN chmod +x /entrypoint.sh /app/gateway/solver-gateway \
       /app/watchdog/solver-watchdog /app/util/solver-util \
       /app/worker/browser_worker.py \
-    && mkdir -p /app/logs /data/logs
+    && mkdir -p /app/logs /data/logs /tmp/solver-proxy-relay \
+    && python -c "import sys; sys.path[:0]=['/app/vendor/CF-Ares','/app/worker']; import cf_ares, proxy_pool; print('cf-ares+proxy_pool OK', getattr(cf_ares,'__version__', '?'))"
 
 EXPOSE 7860
 ENTRYPOINT ["/usr/bin/tini", "--"]

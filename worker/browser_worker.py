@@ -4,7 +4,9 @@ Standalone Turnstile browser worker for hybrid stack.
 
 IPC: line-oriented JSON on stdin/stdout with solver-gateway (Go).
 
-Does NOT depend on grok-free-register — self-contained Playwright solve path.
+Built-in:
+  - multi-proxy pool (PROXY_POOL env) + share-link / socks-auth → local HTTP relay
+  - optional CF-Ares warm (cookies) before Playwright Turnstile inject
 """
 from __future__ import annotations
 
@@ -20,6 +22,11 @@ import time
 import traceback
 from pathlib import Path
 from typing import Any, Optional
+
+# worker/ is on sys.path so proxy_pool / cf_ares_helper import cleanly
+_WORKER_DIR = Path(__file__).resolve().parent
+if str(_WORKER_DIR) not in sys.path:
+    sys.path.insert(0, str(_WORKER_DIR))
 
 os.environ.setdefault("PYTHONMALLOC", "malloc")
 
@@ -295,14 +302,37 @@ class BrowserWorker:
         page_url = (url or "").strip() or DEFAULT_PAGE
         if "://" not in page_url:
             page_url = DEFAULT_PAGE
-        # CF Turnstile domain-bind: for non-x.ai hosts, inject on about:blank is safer
-        # than loading a page that does not host the sitekey (e.g. grok.com).
-        use_blank = (os.environ.get("SOLVER_INJECT_BLANK") or "1").strip().lower() not in {
-            "0",
-            "false",
-            "no",
-            "off",
-        }
+
+        # Resolve proxy from request + PROXY_POOL env (with relay conversion)
+        effective_proxy = ""
+        try:
+            import proxy_pool as _pp
+
+            effective_proxy = (_pp.pick_proxy(explicit=proxy) or "").strip()
+        except Exception as exc:
+            log(f"id={self.worker_id} proxy_pool: {exc}")
+            effective_proxy = (proxy or "").strip()
+
+        # Optional CF-Ares warm (clearance cookies) — runs in thread (sync selenium)
+        ares_warm: dict[str, Any] = {}
+        cf_mode = (os.environ.get("CF_ARES") or "auto").strip().lower()
+        use_ares = cf_mode not in ("0", "false", "no", "off", "disabled")
+        if use_ares:
+            try:
+                import cf_ares_helper as _cah
+
+                if _cah.available():
+                    ares_warm = await asyncio.to_thread(
+                        _cah.warm_session, page_url, effective_proxy or None
+                    )
+                elif cf_mode in ("1", "true", "yes", "on", "always"):
+                    ares_warm = {"ok": False, "error": "cf-ares not available"}
+            except Exception as exc:
+                ares_warm = {"ok": False, "error": str(exc)[:200]}
+                log(f"id={self.worker_id} cf-ares warm error: {exc}")
+
+        # Prefer real page when we have proxy / ares cookies; blank only as last resort
+        use_blank = (os.environ.get("SOLVER_INJECT_BLANK") or "auto").strip().lower()
         host = ""
         try:
             from urllib.parse import urlparse as _up
@@ -310,14 +340,20 @@ class BrowserWorker:
             host = (_up(page_url).hostname or "").lower()
         except Exception:
             host = ""
-        if use_blank and host and "x.ai" not in host and "accounts.x.ai" not in host:
-            # Keep page_url for logging; navigate to blank then set origin via set_content
+        if use_blank in ("1", "true", "yes", "on"):
             navigate_url = "about:blank"
-        else:
+        elif use_blank in ("0", "false", "no", "off"):
             navigate_url = page_url
+        else:
+            # auto: blank only for clearly unrelated hosts without proxy
+            if host and "x.ai" not in host and not effective_proxy:
+                navigate_url = "about:blank"
+            else:
+                navigate_url = page_url
 
         ua = (
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            (ares_warm.get("user_agent") if isinstance(ares_warm, dict) else None)
+            or "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
         )
         context_kwargs: dict[str, Any] = {
@@ -326,22 +362,45 @@ class BrowserWorker:
             "ignore_https_errors": True,
             "locale": "en-US",
         }
-        if proxy:
-            from urllib.parse import urlparse
+        if effective_proxy:
+            try:
+                import proxy_pool as _pp
 
-            u = urlparse(proxy)
-            if u.scheme and u.hostname and u.port:
-                server = f"{u.scheme}://{u.hostname}:{u.port}"
-                px: dict[str, Any] = {"server": server}
-                if u.username:
-                    px["username"] = u.username
-                if u.password:
-                    px["password"] = u.password
-                context_kwargs["proxy"] = px
+                px = _pp.playwright_proxy_dict(effective_proxy)
+                if px:
+                    context_kwargs["proxy"] = px
+            except Exception:
+                from urllib.parse import urlparse
+
+                u = urlparse(effective_proxy)
+                if u.scheme and u.hostname:
+                    port = u.port or (443 if u.scheme == "https" else 80)
+                    px2: dict[str, Any] = {"server": f"{u.scheme}://{u.hostname}:{port}"}
+                    if u.username:
+                        px2["username"] = u.username
+                    if u.password:
+                        px2["password"] = u.password
+                    context_kwargs["proxy"] = px2
 
         context = await self.browser.new_context(**context_kwargs)
+        # Apply CF-Ares cookies before navigation
+        if isinstance(ares_warm, dict) and ares_warm.get("cookies"):
+            try:
+                await context.add_cookies(ares_warm["cookies"])
+            except Exception as exc:
+                log(f"id={self.worker_id} add_cookies: {exc}")
+
         page = await context.new_page()
-        trace: dict[str, Any] = {"page_url": page_url, "navigate": navigate_url, "sitekey": sitekey[:20]}
+        trace: dict[str, Any] = {
+            "page_url": page_url,
+            "navigate": navigate_url,
+            "sitekey": sitekey[:20],
+            "proxy": (effective_proxy[:48] + "…") if len(effective_proxy) > 48 else effective_proxy,
+            "ares_ok": bool(ares_warm.get("ok")) if isinstance(ares_warm, dict) else False,
+            "ares_cookies": len(ares_warm.get("cookies") or []) if isinstance(ares_warm, dict) else 0,
+        }
+        if isinstance(ares_warm, dict) and ares_warm.get("error"):
+            trace["ares_err"] = str(ares_warm.get("error"))[:160]
         t0 = time.time()
         try:
             try:
@@ -494,9 +553,10 @@ class BrowserWorker:
                     await self.recycle()
                     recycled = True
                 await self.ensure_browser()
+                # leave headroom for CF-Ares warm + inject (gateway also enforces timeout)
                 token, trace = await asyncio.wait_for(
                     self._solve_page(url=url, sitekey=sitekey, proxy=proxy),
-                    timeout=self.timeout,
+                    timeout=max(30.0, self.timeout),
                 )
                 self.solves += 1
                 elapsed = time.time() - t0
@@ -607,9 +667,31 @@ async def amain(argv: list[str] | None = None) -> int:
         concurrency=args.concurrency,
         headless=headless,
     )
+    # Proxy pool + CF-Ares status at boot
+    proxy_n = 0
+    ares_ok = False
+    try:
+        import proxy_pool as _pp
+
+        if args.proxy_file and not os.environ.get("PROXY_POOL_FILE"):
+            os.environ["PROXY_POOL_FILE"] = args.proxy_file
+        st = _pp.pool_stats()
+        proxy_n = int(st.get("count") or 0)
+        log(f"id={args.worker_id} proxy_pool count={proxy_n} strategy={st.get('strategy')}")
+    except Exception as exc:
+        log(f"id={args.worker_id} proxy_pool init: {exc}")
+    try:
+        import cf_ares_helper as _cah
+
+        ares_ok = _cah.available()
+        log(f"id={args.worker_id} cf-ares available={ares_ok} mode={os.environ.get('CF_ARES') or 'auto'}")
+    except Exception as exc:
+        log(f"id={args.worker_id} cf-ares init: {exc}")
+
     log(
         f"ready id={args.worker_id} soft={args.soft_mb} hard={args.hard_mb} "
-        f"max_solves={args.max_solves} conc={args.concurrency} backend=standalone"
+        f"max_solves={args.max_solves} conc={args.concurrency} backend=standalone "
+        f"proxies={proxy_n} cf_ares={ares_ok}"
     )
 
     # CLI --prefetch only warms the browser; NEVER write to stdout here.

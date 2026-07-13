@@ -63,13 +63,27 @@ Dockerfile **构建时始终 `git clone` GitHub 完整仓库**，Space 侧不需
      以及 `Source OK: <sha>`
    - 或 Settings → Repository 连到 `xiaocongyu66/turnstile-solver`
 4. 可选 build-arg：`REPO_URL` / `REPO_REF`（换 fork 或分支）
-5. Secrets：
+5. Secrets（必设鉴权；**建议配代理**，HF 机房 IP 常被 CF 拦）：
 
 ```text
 SOLVER_API_TOKEN=强随机串
 SOLVER_GATEWAY_WORKERS=auto
 SOLVER_GATEWAY_WORKERS_MAX=4
 TURNSTILE_SOLVER_HEADLESS=1
+
+# 多代理（逗号/换行均可混用）
+PROXY_POOL=http://user:pass@host:port,socks5://u:p@host:1080
+# 或单条
+# SOLVER_PROXY=http://user:pass@host:port
+# 分享链接 / 带账密 SOCKS 会自动经内置 sing-box 转本地 HTTP
+PROXY_RELAY_ENABLED=1
+PROXY_RELAY_AUTO_INSTALL=1
+PROXY_POOL_STRATEGY=round_robin
+
+# 内置 CF-Ares（预热 cookies 再注入 Turnstile）
+CF_ARES=auto
+CF_ARES_BROWSER_ENGINE=auto
+CF_ARES_HEADLESS=1
 ```
 
 6. 打开 `https://<space>.hf.space/health` 应返回 `ok`
@@ -118,6 +132,17 @@ TURNSTILE_API_URL=http://127.0.0.1:5080
 | `SOLVER_WATCHDOG_INTERVAL_SEC` | **`auto`** | 巡检间隔（内存紧时更勤） |
 | `SOLVER_WATCHDOG_ATTACH` | `1` | 是否挂 Rust watchdog |
 | `TURNSTILE_SOLVER_HEADLESS` | `1` | 无头 |
+| `PROXY_POOL` / `PROXIES` | 空 | 多代理，逗号/换行分隔，支持 http/socks5/vmess/vless/… |
+| `PROXY_POOL_FILE` | 空 | 代理文件路径 |
+| `PROXY_POOL_STRATEGY` | `round_robin` | `round_robin` / `random` |
+| `SOLVER_PROXY` / `CF_ARES_PROXY` | 空 | 单代理覆盖 |
+| `PROXY_RELAY_ENABLED` | `1` | 分享链接 / socks5 账密 → 本地 HTTP 中继 |
+| `PROXY_RELAY_AUTO_INSTALL` | `1` | 自动下载 sing-box |
+| `PROXY_RELAY_WORK_DIR` | `/tmp/solver-proxy-relay` | 中继工作目录 |
+| `CF_ARES` | `auto` | `auto`/`1`/`0` 内置 CF-Ares 预热 |
+| `CF_ARES_BROWSER_ENGINE` | `auto` | `auto` / `undetected` / `seleniumbase` |
+| `CF_ARES_HEADLESS` | `1` | CF-Ares 无头 |
+| `CF_ARES_TIMEOUT` | `45` | CF-Ares 超时秒 |
 
 HF Secrets **最少只需**：
 
