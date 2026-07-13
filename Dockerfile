@@ -151,6 +151,8 @@ RUN set -eux; \
 WORKDIR /app
 COPY --from=source /src/app/worker /app/worker
 COPY --from=source /src/app/vendor/CF-Ares /app/vendor/CF-Ares
+# also ship under worker/ so helper finds it even if CF_ARES_PATH is wrong
+COPY --from=source /src/app/vendor/CF-Ares /app/worker/vendor/CF-Ares
 COPY --from=source /src/app/docker/entrypoint.sh /entrypoint.sh
 COPY --from=gobuild /out/solver-gateway /app/gateway/solver-gateway
 COPY --from=rustbuild /out/solver-watchdog /app/watchdog/solver-watchdog
@@ -167,7 +169,10 @@ RUN chmod +x /entrypoint.sh /app/gateway/solver-gateway \
       /app/watchdog/solver-watchdog /app/util/solver-util \
       /app/worker/browser_worker.py \
     && mkdir -p /app/logs /data/logs /tmp/solver-proxy-relay \
-    && python -c "import sys; sys.path[:0]=['/app/vendor/CF-Ares','/app/worker']; import cf_ares, proxy_pool; print('cf-ares+proxy_pool OK', getattr(cf_ares,'__version__', '?'))"
+    && test -d /app/vendor/CF-Ares/cf_ares \
+    && test -d /app/worker/vendor/CF-Ares/cf_ares \
+    && ls -la /app/vendor/CF-Ares /app/worker/vendor/CF-Ares \
+    && python -c "import sys; sys.path[:0]=['/app/vendor/CF-Ares','/app/worker']; import cf_ares, proxy_pool, cf_ares_helper as h; print('cf-ares+proxy_pool OK', getattr(cf_ares,'__version__', '?'), 'helper', h.available(), h._vendor_path())"
 
 EXPOSE 7860
 ENTRYPOINT ["/usr/bin/tini", "--"]

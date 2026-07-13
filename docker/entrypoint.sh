@@ -71,7 +71,7 @@ export PROXY_RELAY_AUTO_INSTALL="${PROXY_RELAY_AUTO_INSTALL:-1}"
 export PROXY_RELAY_WORK_DIR="${PROXY_RELAY_WORK_DIR:-/tmp/solver-proxy-relay}"
 export PROXY_POOL_STRATEGY="${PROXY_POOL_STRATEGY:-round_robin}"
 export PROXY_TEST_ENABLED="${PROXY_TEST_ENABLED:-1}"
-export PROXY_TEST_URLS="${PROXY_TEST_URLS:-https://accounts.x.ai/sign-up?redirect=grok-com,https://x.ai/}"
+export PROXY_TEST_URLS="${PROXY_TEST_URLS:-https://challenges.cloudflare.com/turnstile/v0/api.js,https://accounts.x.ai/sign-up?redirect=grok-com,https://x.ai/}"
 export PROXY_TEST_TIMEOUT="${PROXY_TEST_TIMEOUT:-12}"
 export PROXY_TEST_WORKERS="${PROXY_TEST_WORKERS:-8}"
 export PROXY_TEST_ACCEPT_STATUS="${PROXY_TEST_ACCEPT_STATUS:-200-399}"
@@ -85,6 +85,11 @@ if [ -n "${PROXY_POOL:-}${PROXY_POOL_LIST:-}${PROXIES:-}${PROXY_LIST:-}${SOLVER_
 fi
 echo "🌐 proxy: ${_proxy_hint}  strategy=${PROXY_POOL_STRATEGY}  relay=${PROXY_RELAY_ENABLED}  test=${PROXY_TEST_ENABLED}"
 echo "🛡️  CF_ARES=${CF_ARES}  path=${CF_ARES_PATH}"
+if [ -d /app/vendor/CF-Ares/cf_ares ]; then
+  echo "   CF-Ares vendor: OK /app/vendor/CF-Ares"
+else
+  echo "   ⚠️  CF-Ares vendor MISSING at /app/vendor/CF-Ares (rebuild image from latest main)"
+fi
 
 # Auto-test proxies can reach accounts.x.ai / x.ai (shared state for workers)
 if [ "${PROXY_TEST_ENABLED}" != "0" ] && [ -n "${PROXY_POOL:-}${PROXY_POOL_LIST:-}${PROXIES:-}${PROXY_LIST:-}${SOLVER_PROXY:-}${CF_ARES_PROXY:-}${PROXY_POOL_FILE:-}" ]; then

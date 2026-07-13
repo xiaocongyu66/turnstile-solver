@@ -432,22 +432,60 @@ class BrowserWorker:
                 trace["goto_fallback"] = str(goto_exc)[:200]
             trace["goto_s"] = round(time.time() - t0, 3)
             t1 = time.time()
+
+            # Probe whether challenges.cloudflare.com is reachable via this browser proxy
+            try:
+                probe = await page.evaluate(
+                    """async () => {
+                      try {
+                        const r = await fetch('https://challenges.cloudflare.com/turnstile/v0/api.js', {
+                          method: 'GET', mode: 'no-cors', cache: 'no-store'
+                        });
+                        return {ok: true, type: r.type, status: r.status};
+                      } catch (e) {
+                        return {ok: false, err: String(e)};
+                      }
+                    }"""
+                )
+                trace["cf_cdn"] = probe
+            except Exception as exc:
+                trace["cf_cdn"] = {"ok": False, "err": str(exc)[:120]}
+
+            # Prefer loading api.js via Playwright (better error than script.onerror alone)
+            api_loaded = False
+            try:
+                await page.add_script_tag(
+                    url="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"
+                )
+                api_loaded = True
+                trace["api_js"] = "add_script_tag_ok"
+            except Exception as exc:
+                trace["api_js"] = f"add_script_tag_fail:{str(exc)[:120]}"
+                log(f"id={self.worker_id} api.js add_script_tag failed: {exc}")
+
             await page.evaluate(
                 f"""() => {{
   if(!document.body){{
     document.documentElement.appendChild(document.createElement('body'));
   }}
-  var d=document.createElement('div');
-  d.className='cf-turnstile';
-  d.setAttribute('data-sitekey','{sk_js}');
-  d.style.cssText='position:fixed;top:10px;left:10px;z-index:99999;background:white;padding:12px;border:2px solid red;border-radius:6px;width:300px;height:70px';
-  document.body.appendChild(d);
-  var i=document.createElement('input');
-  i.type='hidden'; i.name='cf-turnstile-response'; i.id='cf-turnstile-response';
-  document.body.appendChild(i);
+  // hidden response fields (page may already have one)
+  var i=document.querySelector('input[name="cf-turnstile-response"]');
+  if(!i){{
+    i=document.createElement('input');
+    i.type='hidden'; i.name='cf-turnstile-response'; i.id='cf-turnstile-response';
+    document.body.appendChild(i);
+  }}
+  var d=document.querySelector('.cf-turnstile') || document.createElement('div');
+  if(!d.parentElement){{
+    d.className='cf-turnstile';
+    d.setAttribute('data-sitekey','{sk_js}');
+    d.style.cssText='position:fixed;top:10px;left:10px;z-index:99999;background:white;padding:12px;border:2px solid red;border-radius:6px;width:300px;min-height:70px';
+    document.body.appendChild(d);
+  }}
   function __r(){{
     if(!window.turnstile) return;
     try {{
+      if(d.getAttribute('data-cf-rendered')==='1') return;
       window.turnstile.render(d, {{
         sitekey: '{sk_js}',
         callback: function(t) {{
@@ -457,56 +495,73 @@ class BrowserWorker:
           window.__cf_token=t;
         }},
         'error-callback': function(e) {{ window.__cf_err=String(e||'error'); }},
-        'expired-callback': function() {{ window.__cf_err='expired'; }}
+        'expired-callback': function() {{ window.__cf_err='expired'; }},
+        'timeout-callback': function() {{ window.__cf_err='timeout'; }}
       }});
+      d.setAttribute('data-cf-rendered','1');
     }} catch (e) {{ window.__cf_err=String(e); }}
   }}
   if(window.turnstile){{ __r(); }}
-  else {{
+  else if(!{str(api_loaded).lower()}) {{
     var s=document.createElement('script');
     s.src='https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
     s.async=true;
     s.onload=function(){{ setTimeout(__r, 400); }};
     s.onerror=function(){{ window.__cf_err='api.js load failed'; }};
     document.head.appendChild(s);
+  }} else {{
+    // script tag added; wait a tick for global
+    setTimeout(__r, 500);
+    setTimeout(__r, 1500);
   }}
 }}"""
             )
             trace["inject_s"] = round(time.time() - t1, 3)
 
-            # mouse nudge on widget center (after short delay for iframe)
-            await asyncio.sleep(0.8)
-            try:
-                box = await page.evaluate(
-                    """() => {
-                      const e = document.querySelector('.cf-turnstile, iframe[src*="challenges.cloudflare"]');
-                      if (!e) return null;
-                      const r = e.getBoundingClientRect();
-                      return {x: r.left + r.width/2, y: r.top + r.height/2};
-                    }"""
-                )
-                if box:
-                    x, y = float(box["x"]), float(box["y"])
-                    await page.mouse.move(max(0, x - 20), max(0, y - 6))
-                    await page.mouse.move(x, y, steps=8)
-                    await page.mouse.down()
-                    await asyncio.sleep(0.06)
-                    await page.mouse.up()
-                    await page.mouse.click(x, y, delay=40)
-            except Exception:
-                pass
+            # Repeated mouse nudges on widget / challenge iframes
+            async def _nudge() -> None:
+                try:
+                    boxes = await page.evaluate(
+                        """() => {
+                          const nodes = [
+                            ...document.querySelectorAll('.cf-turnstile'),
+                            ...document.querySelectorAll('iframe[src*="challenges.cloudflare"]'),
+                            ...document.querySelectorAll('iframe[src*="turnstile"]'),
+                          ];
+                          return nodes.map(e => {
+                            const r = e.getBoundingClientRect();
+                            return {x: r.left + r.width/2, y: r.top + r.height/2, w: r.width, h: r.height};
+                          }).filter(b => b.w > 5 && b.h > 5);
+                        }"""
+                    )
+                    for box in boxes or []:
+                        x, y = float(box["x"]), float(box["y"])
+                        await page.mouse.move(max(0, x - 20), max(0, y - 6))
+                        await page.mouse.move(x, y, steps=8)
+                        await page.mouse.click(x, y, delay=40)
+                except Exception:
+                    pass
+
+            await asyncio.sleep(0.6)
+            await _nudge()
 
             t2 = time.time()
             token = ""
             deadline = time.time() + max(25.0, self.timeout - 5)
+            nudge_at = time.time() + 3.0
             while time.time() < deadline:
                 try:
                     token = await page.evaluate(
                         """() => {
-                          return window.__cf_token
-                            || document.querySelector('input[name="cf-turnstile-response"]')?.value
-                            || document.querySelector('#cf-turnstile-response')?.value
-                            || '';
+                          const vals = [];
+                          const a = window.__cf_token; if (a) vals.push(a);
+                          document.querySelectorAll('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"], #cf-turnstile-response')
+                            .forEach(el => { if (el.value) vals.push(el.value); });
+                          // some pages stash token on data attributes
+                          document.querySelectorAll('[data-cf-turnstile-response]').forEach(el => {
+                            const v = el.getAttribute('data-cf-turnstile-response'); if (v) vals.push(v);
+                          });
+                          return vals.find(v => v && v.length > 20) || '';
                         }"""
                     )
                     if not token:
@@ -517,6 +572,24 @@ class BrowserWorker:
                     token = ""
                 if token and len(token) > 20:
                     break
+                if time.time() >= nudge_at:
+                    await _nudge()
+                    # re-call render if turnstile loaded late
+                    try:
+                        await page.evaluate(
+                            """() => {
+                              if (window.turnstile && window.__cf_err === 'api.js load failed') {
+                                window.__cf_err = '';
+                              }
+                              const d = document.querySelector('.cf-turnstile');
+                              if (d && window.turnstile && d.getAttribute('data-cf-rendered') !== '1') {
+                                try { /* leave to inject path */ } catch(e) {}
+                              }
+                            }"""
+                        )
+                    except Exception:
+                        pass
+                    nudge_at = time.time() + 5.0
                 await asyncio.sleep(0.4)
             trace["wait_s"] = round(time.time() - t2, 3)
             if not token:
@@ -525,6 +598,8 @@ class BrowserWorker:
                     trace["iframe_n"] = await page.evaluate(
                         "() => document.querySelectorAll('iframe').length"
                     )
+                    trace["title"] = await page.title()
+                    trace["url_now"] = page.url
                 except Exception:
                     pass
             return token or "", trace

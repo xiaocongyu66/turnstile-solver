@@ -285,7 +285,9 @@ def _test_urls() -> list[str]:
         urls = [u.strip() for u in re.split(r"[\n,;]+", raw) if u.strip()]
         if urls:
             return urls
+    # Must reach CF challenge CDN, not only x.ai (403 on x.ai is not enough for Turnstile)
     return [
+        "https://challenges.cloudflare.com/turnstile/v0/api.js",
         "https://accounts.x.ai/sign-up?redirect=grok-com",
         "https://x.ai/",
     ]
@@ -415,20 +417,63 @@ def _probe_one(proxy: str, url: str, timeout: float) -> dict[str, Any]:
 
 
 def test_proxy(proxy: str) -> dict[str, Any]:
-    """Test one browser proxy against configured xAI URLs."""
+    """Test one browser proxy: must reach CF Turnstile CDN, then xAI if listed."""
     timeout = float(_env_int("PROXY_TEST_TIMEOUT", 12))
     ranges = _parse_status_ranges(
         os.environ.get("PROXY_TEST_ACCEPT_STATUS")
         or os.environ.get("PROXY_AUTO_TEST_ACCEPT_STATUS")
         or "200-399"
     )
+    urls = _test_urls()
+    # Hard requirement for Turnstile: challenges.cloudflare.com must load
+    require_cf = _env_bool("PROXY_TEST_REQUIRE_CF_CDN", True)
+    cf_urls = [u for u in urls if "challenges.cloudflare.com" in u]
+    other_urls = [u for u in urls if "challenges.cloudflare.com" not in u]
+    if require_cf and not cf_urls:
+        cf_urls = ["https://challenges.cloudflare.com/turnstile/v0/api.js"]
+
     last: dict[str, Any] = {"proxy": proxy, "ok": False, "error": "no url"}
-    for url in _test_urls():
+    cf_ok = not require_cf
+    for url in cf_urls:
+        r = _probe_one(proxy, url, timeout)
+        code = int(r.get("status") or 0)
+        # api.js often returns 200; also accept 304
+        r["ok"] = code in (200, 301, 302, 304) or (code > 0 and _status_ok(code, ranges) and code < 400)
+        last = r
+        last["cf_cdn"] = True
+        if r["ok"]:
+            cf_ok = True
+            break
+        last["error"] = last.get("error") or f"cf cdn status={code}"
+
+    if require_cf and not cf_ok:
+        last["ok"] = False
+        last["error"] = (last.get("error") or "cf cdn unreachable")[:160]
+        return last
+
+    # Optional: also prove x.ai edge is reachable (403 CF interstitial is OK)
+    for url in other_urls:
         r = _probe_one(proxy, url, timeout)
         r["ok"] = bool(r.get("status")) and _status_ok(int(r.get("status") or 0), ranges)
-        last = r
         if r["ok"]:
+            r["cf_cdn"] = cf_ok
             return r
+        last = r
+        last["cf_cdn"] = cf_ok
+
+    # CF CDN ok is enough even if x.ai probe flaky
+    if cf_ok:
+        return {
+            "proxy": proxy,
+            "ok": True,
+            "status": last.get("status") or 200,
+            "ms": last.get("ms") or 0,
+            "error": "",
+            "url": cf_urls[0] if cf_urls else "",
+            "cf_cdn": True,
+            "method": last.get("method") or "curl",
+        }
+    last["ok"] = False
     return last
 
 

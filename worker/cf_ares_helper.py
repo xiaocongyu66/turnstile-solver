@@ -41,28 +41,47 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 def _vendor_path() -> Optional[Path]:
     raw = (os.environ.get("CF_ARES_PATH") or "").strip()
-    candidates = []
+    candidates: list[Path] = []
     if raw:
-        candidates.append(Path(raw).expanduser())
-    # image layout: /app/vendor/CF-Ares
+        p = Path(raw).expanduser()
+        candidates.append(p)
+        # allow CF_ARES_PATH pointing at package root or its parent
+        if p.name == "cf_ares" and p.is_dir():
+            candidates.append(p.parent)
     here = Path(__file__).resolve()
     candidates.extend(
         [
             here.parents[1] / "vendor" / "CF-Ares",
+            here.parent / "vendor" / "CF-Ares",
             Path("/app/vendor/CF-Ares"),
             Path("/opt/vendor/CF-Ares"),
+            Path("/app/worker/vendor/CF-Ares"),
         ]
     )
+    seen: set[str] = set()
     for c in candidates:
-        if (c / "cf_ares").is_dir():
+        key = str(c)
+        if key in seen:
+            continue
+        seen.add(key)
+        if (c / "cf_ares" / "__init__.py").is_file() or (c / "cf_ares").is_dir():
             return c
+        # installed as plain package dir
+        if (c / "__init__.py").is_file() and c.name == "cf_ares":
+            return c.parent
     return None
 
 
 def add_import_path() -> bool:
     root = _vendor_path()
     if root is None:
-        return False
+        # last resort: already on PYTHONPATH / site-packages
+        try:
+            import cf_ares  # noqa: F401
+
+            return True
+        except Exception:
+            return False
     text = str(root)
     if text in sys.path:
         sys.path.remove(text)
@@ -75,11 +94,16 @@ def available() -> bool:
     mode = (os.environ.get("CF_ARES") or "auto").strip().lower()
     if mode in ("0", "false", "no", "off", "disabled"):
         return False
-    if _IMPORT_ERROR is not None and mode != "1":
+    if _IMPORT_ERROR is not None and mode not in ("1", "true", "yes", "on", "always"):
         return False
     if not add_import_path():
         if mode in ("1", "true", "yes", "on", "always"):
-            log("CF_ARES forced but vendor path missing")
+            here = Path(__file__).resolve()
+            log(
+                f"CF_ARES forced but vendor path missing "
+                f"(CF_ARES_PATH={os.environ.get('CF_ARES_PATH')!r} "
+                f"helper={here} exists_app={Path('/app/vendor/CF-Ares').exists()})"
+            )
         return False
     try:
         from cf_ares import AresClient  # noqa: F401
