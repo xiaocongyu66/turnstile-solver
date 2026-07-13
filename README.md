@@ -100,17 +100,32 @@ TURNSTILE_API_URL=http://127.0.0.1:5080
 
 ## 环境变量
 
+多数调优项支持 **`auto`**（空 / `0` / `auto` 等价）：按 **CPU 核数 + 可用/总内存** 推算。
+
 | 变量 | 默认 | 说明 |
 |------|------|------|
-| `PORT` / `SOLVER_GATEWAY_PORT` | `7860` (HF) / `5080` | 监听端口 |
+| `SOLVER_API_TOKEN` | 空 | 公网鉴权（必设） |
+| `PORT` | `7860` | HF 监听端口 |
 | `HOST` | `0.0.0.0` | 绑定地址 |
-| `SOLVER_GATEWAY_WORKERS` | `auto` | 浏览器进程数 |
-| `SOLVER_GATEWAY_WORKERS_MAX` | `4` | auto 上限 |
-| `SOLVER_WORKER_CONCURRENCY` | `0` | 每浏览器页数，0=自动 |
-| `SOLVER_WATCHDOG_SOFT_MB` | `700` | 软回收 |
-| `SOLVER_WATCHDOG_HARD_MB` | `1100` | 硬回收 |
-| `SOLVER_API_TOKEN` | 空 | 公网鉴权 |
+| `SOLVER_GATEWAY_WORKERS` | **`auto`** | 浏览器数 |
+| `SOLVER_GATEWAY_WORKERS_MAX` | **`auto`** | auto 时上限 |
+| `SOLVER_WORKER_CONCURRENCY` | **`auto`** | 每浏览器页数 |
+| `SOLVER_GATEWAY_TIMEOUT` | **`auto`** | 单次超时秒 |
+| `SOLVER_GATEWAY_QUEUE` | **`auto`** | 队列深度 |
+| `SOLVER_WORKER_MAX_SOLVES` | **`auto`** | 每浏览器求解次数后回收 |
+| `SOLVER_WATCHDOG_SOFT_MB` | **`auto`** | 软内存 MB（按主机 RAM 档） |
+| `SOLVER_WATCHDOG_HARD_MB` | **`auto`** | 硬内存 MB |
+| `SOLVER_WATCHDOG_INTERVAL_SEC` | **`auto`** | 巡检间隔（内存紧时更勤） |
+| `SOLVER_WATCHDOG_ATTACH` | `1` | 是否挂 Rust watchdog |
 | `TURNSTILE_SOLVER_HEADLESS` | `1` | 无头 |
+
+HF Secrets **最少只需**：
+
+```text
+SOLVER_API_TOKEN=你的强随机串
+```
+
+其余不填即全 auto。需要压测时再固定数字，例如 `SOLVER_GATEWAY_WORKERS=4`。
 
 ## License
 
