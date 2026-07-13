@@ -38,7 +38,7 @@ import (
 	"time"
 )
 
-const version = "0.4.3"
+const version = "0.4.4"
 
 type Job struct {
 	ID        string `json:"id"`

@@ -89,15 +89,17 @@ if [ -n "${PROXY_POOL:-}${PROXY_POOL_LIST:-}${PROXIES:-}${PROXY_LIST:-}${SOLVER_
 fi
 echo "🌐 proxy: ${_proxy_hint}  strategy=${PROXY_POOL_STRATEGY}  relay=${PROXY_RELAY_ENABLED}  test=${PROXY_TEST_ENABLED}"
 echo "🛡️  CF_ARES=${CF_ARES} engine=${CF_ARES_BROWSER_ENGINE} path=${CF_ARES_PATH}"
-# Diagnose CF-Ares (vendor + pip fallback)
+# Thin adapter diagnose — uses vendor/CF-Ares as library (not rewritten)
 python - <<'PY' 2>/dev/null || echo "   ⚠️  CF-Ares diagnose failed"
 import sys
 sys.path[:0] = ["/app/worker", "/app/vendor/CF-Ares"]
 try:
     import cf_ares_helper as h
     d = h.diagnose()
-    print(f"   CF-Ares available={d.get('available')} vendor={d.get('vendor_path')} "
-          f"app_vendor={d.get('exists_app_vendor')} pip_or_path_err={d.get('error') or 'none'}")
+    print(
+        f"   CF-Ares available={d.get('available')} ver={d.get('version')} "
+        f"vendor={d.get('vendor_path')} err={d.get('error') or 'none'}"
+    )
 except Exception as e:
     print(f"   ⚠️  CF-Ares import error: {e}")
 PY

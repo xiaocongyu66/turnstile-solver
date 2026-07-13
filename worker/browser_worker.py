@@ -313,40 +313,34 @@ class BrowserWorker:
             log(f"id={self.worker_id} proxy_pool: {exc}")
             effective_proxy = (proxy or "").strip()
 
-        # CF-Ares official path: solve_challenge → get_session_info → cookies for Playwright
+        # CF-Ares (vendor lib as-is): solve_challenge → cookies → Playwright inject
         ares_warm: dict[str, Any] = {}
-        cf_mode = (os.environ.get("CF_ARES") or "auto").strip().lower()
-        use_ares = cf_mode not in ("0", "false", "no", "off", "disabled")
-        if use_ares:
-            try:
-                import cf_ares_helper as _cah
+        try:
+            import cf_ares_helper as _cah
 
-                if _cah.available():
-                    log(
-                        f"id={self.worker_id} CF-Ares solve_challenge "
-                        f"url={page_url[:60]} proxy={(effective_proxy or 'direct')[:40]}"
-                    )
-                    ares_warm = await asyncio.to_thread(
-                        _cah.solve_challenge,
-                        page_url,
-                        effective_proxy or None,
-                    )
-                    log(
-                        f"id={self.worker_id} CF-Ares done ok={ares_warm.get('ok')} "
-                        f"cookies={len(ares_warm.get('cookies') or [])} "
-                        f"status={ares_warm.get('status')} via={ares_warm.get('challenge')}"
-                    )
-                else:
-                    diag = _cah.diagnose()
-                    ares_warm = {
-                        "ok": False,
-                        "error": f"cf-ares unavailable: {diag.get('error') or 'import'}",
-                        "diag": diag,
-                    }
-                    log(f"id={self.worker_id} CF-Ares unavailable diag={diag}")
-            except Exception as exc:
-                ares_warm = {"ok": False, "error": str(exc)[:200]}
-                log(f"id={self.worker_id} cf-ares warm error: {exc}")
+            if _cah.enabled() and _cah.available():
+                log(
+                    f"id={self.worker_id} CF-Ares solve_challenge "
+                    f"url={page_url[:60]} proxy={(effective_proxy or 'direct')[:40]}"
+                )
+                ares_warm = await asyncio.to_thread(
+                    _cah.solve_challenge,
+                    page_url,
+                    effective_proxy or None,
+                )
+                log(
+                    f"id={self.worker_id} CF-Ares done ok={ares_warm.get('ok')} "
+                    f"cookies={len(ares_warm.get('cookies') or [])} "
+                    f"cf_clearance={ares_warm.get('has_cf_clearance')} "
+                    f"status={ares_warm.get('status')} via={ares_warm.get('challenge')}"
+                )
+            elif _cah.enabled():
+                diag = _cah.diagnose()
+                ares_warm = {"ok": False, "error": diag.get("error") or "unavailable"}
+                log(f"id={self.worker_id} CF-Ares unavailable: {diag}")
+        except Exception as exc:
+            ares_warm = {"ok": False, "error": str(exc)[:200]}
+            log(f"id={self.worker_id} CF-Ares error: {exc}")
 
         # Prefer real page when we have proxy / ares cookies; blank only as last resort
         use_blank = (os.environ.get("SOLVER_INJECT_BLANK") or "auto").strip().lower()
@@ -415,9 +409,14 @@ class BrowserWorker:
             "proxy": (effective_proxy[:48] + "…") if len(effective_proxy) > 48 else effective_proxy,
             "ares_ok": bool(ares_warm.get("ok")) if isinstance(ares_warm, dict) else False,
             "ares_cookies": len(ares_warm.get("cookies") or []) if isinstance(ares_warm, dict) else 0,
+            "ares_cf_clearance": bool(ares_warm.get("has_cf_clearance"))
+            if isinstance(ares_warm, dict)
+            else False,
         }
         if isinstance(ares_warm, dict) and ares_warm.get("error"):
             trace["ares_err"] = str(ares_warm.get("error"))[:160]
+        if isinstance(ares_warm, dict) and ares_warm.get("challenge"):
+            trace["ares_via"] = str(ares_warm.get("challenge"))
         t0 = time.time()
         try:
             try:
@@ -784,7 +783,12 @@ async def amain(argv: list[str] | None = None) -> int:
         import cf_ares_helper as _cah
 
         ares_ok = _cah.available()
-        log(f"id={args.worker_id} cf-ares available={ares_ok} mode={os.environ.get('CF_ARES') or 'auto'}")
+        diag = _cah.diagnose()
+        log(
+            f"id={args.worker_id} cf-ares available={ares_ok} "
+            f"mode={os.environ.get('CF_ARES') or '1'} "
+            f"vendor={diag.get('vendor_path')} ver={diag.get('version')}"
+        )
     except Exception as exc:
         log(f"id={args.worker_id} cf-ares init: {exc}")
 
