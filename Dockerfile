@@ -1,44 +1,39 @@
 # syntax=docker/dockerfile:1
 # Standalone Hybrid Turnstile Solver (Go + Rust + C++ + Python)
-# Hugging Face Space: SDK=Docker, hardware ≥ 2 vCPU / 16 GB recommended
 #
-# IMPORTANT: Space must include the FULL repo (gateway/, watchdog/, util/, worker/).
-# If Space git only has this Dockerfile, set build to clone GitHub:
-#   REPO_URL=https://github.com/xiaocongyu66/turnstile-solver.git
-#   REPO_REF=main
+# HF Space 拉取方式（推荐）：
+#   Space 里只需本 Dockerfile（或连 GitHub 后自动同步）。
+#   构建时 ALWAYS git clone 完整仓库，不依赖 Space 上传 gateway/watchdog/worker。
+#
+#   REPO_URL 默认: https://github.com/xiaocongyu66/turnstile-solver.git
+#   REPO_REF 默认: main
+#
+# Hardware: ≥ 2 vCPU / 16 GB RAM recommended (Chromium)
 
 ARG PYTHON_VERSION=3.11-bookworm
 ARG REPO_URL=https://github.com/xiaocongyu66/turnstile-solver.git
 ARG REPO_REF=main
 
-# ========== Stage 0: Resolve full source tree ==========
-# Prefer build context; if watchdog/src missing (thin Space), clone from GitHub.
+# ========== Stage 0: ALWAYS clone full GitHub source ==========
 FROM debian:bookworm-slim AS source
 ARG REPO_URL
 ARG REPO_REF
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-WORKDIR /ctx
-# Copy everything the Space/build context provides
-COPY . /ctx/build-context/
+WORKDIR /src
 RUN set -eu; \
-    if [ -f /ctx/build-context/watchdog/src/main.rs ] \
-       && [ -f /ctx/build-context/gateway/main.go ] \
-       && [ -f /ctx/build-context/worker/browser_worker.py ]; then \
-      echo "Using build context (full tree)"; \
-      cp -a /ctx/build-context /src/app; \
-    else \
-      echo "Build context incomplete — cloning ${REPO_URL} @ ${REPO_REF}"; \
-      git clone --depth 1 --branch "${REPO_REF}" "${REPO_URL}" /src/app \
-        || git clone --depth 1 "${REPO_URL}" /src/app; \
-      cd /src/app && git checkout "${REPO_REF}" 2>/dev/null || true; \
-    fi; \
+    echo "Cloning ${REPO_URL} @ ${REPO_REF}"; \
+    git clone --depth 1 --branch "${REPO_REF}" "${REPO_URL}" /src/app \
+      || git clone --depth 1 "${REPO_URL}" /src/app; \
+    cd /src/app && git checkout "${REPO_REF}" 2>/dev/null || true; \
     test -f /src/app/watchdog/src/main.rs; \
     test -f /src/app/gateway/main.go; \
     test -f /src/app/worker/browser_worker.py; \
     test -f /src/app/util/solver_util.cpp; \
-    echo "Source OK: $(cd /src/app && git rev-parse --short HEAD 2>/dev/null || echo context)"
+    test -f /src/app/docker/entrypoint.sh; \
+    echo "Source OK: $(cd /src/app && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
 # ---------- Go gateway ----------
 FROM golang:1.22-bookworm AS gobuild
